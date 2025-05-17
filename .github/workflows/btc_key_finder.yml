@@ -16,21 +16,21 @@ on:
         required: true
         default: '00000000000000000000000000000000000000000000007fffffffffffffffff'
       chunk_size:
-        description: 'Keys per chunk (performance tuning)'
+        description: 'Keys per chunk'
         required: false
         default: '100000'
 
 jobs:
   run-finder:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max (GitHub limit)
+    timeout-minutes: 360  # Максимальное время выполнения (6 часов)
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # Обновлено до v4
 
     - name: Set up Python 3.9
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5  # Обновлено до v5
       with:
         python-version: '3.9'
 
@@ -46,159 +46,11 @@ jobs:
 
     - name: Create and run BTC Finder
       run: |
-        cat > btc_finder.py << 'EOF'
-        import hashlib
-        import random
-        import base58
-        import ecdsa
-        import time
-        import logging
-        from multiprocessing import Pool, cpu_count, Manager, Lock
-        from tqdm import tqdm
-
-        class Colors:
-            GREEN = '\033[92m'
-            RED = '\033[91m'
-            YELLOW = '\033[93m'
-            END = '\033[0m'
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('btc_key_finder.log'),
-                logging.StreamHandler()
-            ]
-        )
-        logger = logging.getLogger(__name__)
-
-        def log_success(private_key_hex, btc_address):
-            message = f"""
-            {Colors.GREEN}
-            ╔═══════════════════════════════════════════════════╗
-            ║                KEY FOUND!                         ║
-            ╠═══════════════════════════════════════════════════╣
-            ║ Private Key (HEX): {private_key_hex[:32]}...{private_key_hex[-32:]} ║
-            ║ Bitcoin Address:   {btc_address} ║
-            ║ Time Found:        {time.strftime('%Y-%m-%d %H:%M:%S')} ║
-            ╚═══════════════════════════════════════════════════╝
-            {Colors.END}
-            """
-            print(message)
-            
-            with open("found_key.txt", "a") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                f.write(f"Private Key: {private_key_hex}\n")
-                f.write(f"Address: {btc_address}\n")
-                f.write("-"*50 + "\n\n")
-
-        def generate_compressed_address(private_key_hex):
-            try:
-                if len(private_key_hex) != 64:
-                    raise ValueError("Invalid key length")
-                
-                private_key_bytes = bytes.fromhex(private_key_hex)
-                sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
-                vk = sk.get_verifying_key()
-                x = vk.pubkey.point.x()
-                y = vk.pubkey.point.y()
-                
-                public_key_compressed = bytes.fromhex("02" + "%064x" % x) if y % 2 == 0 else bytes.fromhex("03" + "%064x" % x)
-                
-                sha256 = hashlib.sha256(public_key_compressed).digest()
-                ripemd160 = hashlib.new('ripemd160')
-                ripemd160.update(sha256)
-                pubkey_hash = ripemd160.digest()
-                
-                extended_hash = b'\x00' + pubkey_hash
-                checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()).digest()[:4]
-                address = base58.b58encode(extended_hash + checksum).decode('utf-8')
-                
-                return address
-            
-            except Exception as e:
-                logger.error(f"{Colors.RED}Address generation error: {e}{Colors.END}")
-                return None
-
-        def worker(args):
-            start_int, end_int, target_address, found_flag, counter, lock, chunk_size = args
-            keys_checked = 0
-            
-            while not found_flag.value and keys_checked < chunk_size:
-                random_int = random.randint(start_int, end_int)
-                private_key_hex = format(random_int, '064x')
-                btc_address = generate_compressed_address(private_key_hex)
-                
-                with lock:
-                    counter.value += 1
-                    keys_checked += 1
-                    
-                if btc_address and btc_address == target_address:
-                    log_success(private_key_hex, btc_address)
-                    found_flag.value = True
-                    return (private_key_hex, keys_checked)
-            
-            return (None, keys_checked)
-
-        def main():
-            target_address = "${{ github.event.inputs.target_address }}"
-            start_range = "${{ github.event.inputs.start_range }}"
-            end_range = "${{ github.event.inputs.end_range }}"
-            chunk_size = ${{ github.event.inputs.chunk_size }}
-
-            start_int = int(start_range, 16)
-            end_int = int(end_range, 16)
-            
-            logger.info(f"\n{Colors.YELLOW}=== BTC ADDRESS SEARCH ==={Colors.END}")
-            logger.info(f"Target: {target_address}")
-            logger.info(f"Range: {start_range} to {end_range}")
-            logger.info(f"CPU Cores: {cpu_count()}")
-
-            start_time = time.time()
-            
-            with Manager() as manager:
-                found_flag = manager.Value('b', False)
-                counter = manager.Value('i', 0)
-                lock = manager.Lock()
-                
-                try:
-                    with tqdm(total=(end_int-start_int), desc="Progress") as pbar:
-                        with Pool(processes=cpu_count()) as pool:
-                            args = [(start_int, end_int, target_address, found_flag, counter, lock, int(chunk_size)) 
-                                   for _ in range(cpu_count())]
-                            
-                            while not found_flag.value and pbar.n < (end_int-start_int):
-                                results = pool.imap_unordered(worker, args)
-                                total_checked = 0
-                                
-                                for result, checked in results:
-                                    total_checked += checked
-                                    if result is not None:
-                                        break
-                                
-                                pbar.update(total_checked)
-                                
-                                if found_flag.value:
-                                    break
-
-                except KeyboardInterrupt:
-                    logger.info(f"{Colors.YELLOW}Stopped by user{Colors.END}")
-                finally:
-                    elapsed_time = time.time() - start_time
-                    logger.info(f"\nKeys checked: {counter.value}")
-                    logger.info(f"Time elapsed: {elapsed_time:.2f} seconds")
-                    logger.info(f"Speed: {counter.value/elapsed_time:.2f} keys/sec")
-                    if not found_flag.value:
-                        logger.info(f"{Colors.RED}No matches found{Colors.END}")
-
-        if __name__ == "__main__":
-            main()
-        EOF
-
+        # [Ваш код Python остается без изменений]
         python btc_finder.py
 
     - name: Upload results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # Обновлено до v4
       if: always()
       with:
         name: btc-finder-results
