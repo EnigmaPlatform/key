@@ -89,9 +89,9 @@ def generate_and_check(start_int, end_int, target_address, progress_bar):
             logger.error(f"{Colors.RED}Ошибка: {e}{Colors.END}")
 
 def main():
-    target_address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"  # Замените на нужный адрес
-    start_range = "0000000000000000000000000000000000000000000000000000000000000001"
-    end_range = "000000000000000000000000000000000000000000000000FFFFFFFFFFFFFFFF"
+    target_address = "1HduPEXZRdG26SUT5Yk83mLkPyjnZuJ7Bm"  # Замените на нужный адрес
+    start_range = "000000000000000000000000000000000000000000000000000000000001754f"
+    end_range = "000000000000000000000000000000000000000000000000000000000001764f"
 
     start_int = int(start_range, 16)
     end_int = int(end_range, 16)
