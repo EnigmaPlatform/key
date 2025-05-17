@@ -136,7 +136,7 @@ def main():
     start_int = int(start_range, 16)
     end_int = int(end_range, 16)
     total_keys = end_int - start_int + 1
-    chunk_size = 1000
+    chunk_size = 100000
 
     logger.info(f"\n{Colors.YELLOW}=== ПОИСК СОВПАДЕНИЙ ==={Colors.END}")
     logger.info(f"Ищем: {target_address}")
