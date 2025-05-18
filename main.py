@@ -8,7 +8,6 @@ import os
 from tqdm import tqdm
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
-from intervaltree import IntervalTree
 import signal
 
 class Colors:
@@ -20,41 +19,59 @@ class Colors:
 # Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 10_000_000  # Размер проверяемого блока
-MAIN_START = 0x349b84b6431a6c0ef1  # Начало диапазона
-MAIN_END = 0x349b84b6431a6c4ef9    # Конец диапазона
-BATCH_SIZE = 1000                  # Размер пакета для многопоточной обработки
-MAX_WORKERS = 4                    # Количество потоков
-SAVE_INTERVAL = 10                 # Интервал сохранения (в блоках)
+CHUNK_SIZE = 10_000_000
+MAIN_START = 0x349b84b6431a6c0ef1
+MAIN_END = 0x349b84b6431a6c4ef9
+BATCH_SIZE = 1000
+MAX_WORKERS = 4
+SAVE_INTERVAL = 10
 
-# Глобальные переменные для обработки прерываний
+# Глобальные переменные
 stop_flag = False
 current_chunk = None
 
-def init_checked_ranges():
-    """Инициализация структуры для хранения проверенных диапазонов"""
+def load_checked_ranges():
+    """Загружает проверенные диапазоны из файла"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
-                data = json.load(f)
-                tree = IntervalTree()
-                for item in data:
-                    tree.addi(item['start'], item['end']+1, item)
-                return tree
+                return json.load(f)
         except:
-            return IntervalTree()
-    return IntervalTree()
+            return []
+    return []
 
-def save_checked_ranges(tree):
-    """Сохранение проверенных диапазонов"""
-    data = [{'start': iv.begin, 'end': iv.end-1, 'checked_at': iv.data['checked_at']} 
-            for iv in tree]
+def save_checked_ranges(ranges):
+    """Сохраняет проверенные диапазоны в файл"""
     with open(CHECKPOINT_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+        json.dump(ranges, f, indent=2)
+
+def is_key_checked(key_int, checked_ranges):
+    """Проверяет, был ли ключ проверен"""
+    for r in checked_ranges:
+        if r['start'] <= key_int <= r['end']:
+            return True
+    return False
+
+def merge_ranges(ranges):
+    """Объединяет перекрывающиеся диапазоны"""
+    if not ranges:
+        return []
+    
+    sorted_ranges = sorted(ranges, key=lambda x: x['start'])
+    merged = [sorted_ranges[0]]
+    
+    for current in sorted_ranges[1:]:
+        last = merged[-1]
+        if current['start'] <= last['end']:
+            last['end'] = max(last['end'], current['end'])
+        else:
+            merged.append(current)
+    
+    return merged
 
 @lru_cache(maxsize=100000)
 def generate_address(private_key_hex):
-    """Генерация Bitcoin-адреса с кешированием"""
+    """Генерирует Bitcoin-адрес с кешированием"""
     try:
         private_key_bytes = bytes.fromhex(private_key_hex)
         sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
@@ -75,7 +92,7 @@ def generate_address(private_key_hex):
         return None
 
 def check_batch(batch, target):
-    """Проверка пакета ключей в нескольких потоках"""
+    """Проверяет пакет ключей в нескольких потоках"""
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         results = list(executor.map(generate_address, batch))
         if target in results:
@@ -83,11 +100,11 @@ def check_batch(batch, target):
     return None
 
 def check_sequential_chunk(start_key, target_address, checked_ranges):
-    """Проверка последовательного блока ключей"""
+    """Проверяет последовательный блок ключей"""
     global stop_flag, current_chunk
     
     end_key = min(start_key + CHUNK_SIZE - 1, MAIN_END)
-    current_chunk = (start_key, end_key)
+    current_chunk = {'start': start_key, 'end': end_key}
     
     with tqdm(total=end_key-start_key+1, 
              desc=f"Проверка {hex(start_key)}-{hex(end_key)}", 
@@ -108,16 +125,18 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
             pbar.update(batch_end - batch_start + 1)
     
     if not stop_flag:
-        checked_ranges.addi(start_key, end_key+1, {
+        checked_ranges.append({
+            'start': start_key,
+            'end': end_key,
             'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
         })
         if len(checked_ranges) % SAVE_INTERVAL == 0:
-            save_checked_ranges(checked_ranges)
+            save_checked_ranges(merge_ranges(checked_ranges))
     
     return None
 
 def signal_handler(sig, frame):
-    """Обработчик сигнала прерывания"""
+    """Обрабатывает сигнал прерывания"""
     global stop_flag
     print(f"\n{Colors.YELLOW}Получен сигнал прерывания...{Colors.END}")
     stop_flag = True
@@ -129,8 +148,8 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
     # Настройка обработчика прерываний
     signal.signal(signal.SIGINT, signal_handler)
     
-    checked_ranges = init_checked_ranges()
-    total_checked = sum(iv.end-iv.begin for iv in checked_ranges)
+    checked_ranges = merge_ranges(load_checked_ranges())
+    total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
     
     print(f"{Colors.YELLOW}Поиск ключа для адреса: {target_address}{Colors.END}")
     print(f"Уже проверено: {total_checked:,} ключей")
@@ -143,7 +162,7 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
             attempts = 0
             while not stop_flag:
                 random_key = random.randint(MAIN_START, MAIN_END)
-                if not checked_ranges.overlaps(random_key):
+                if not is_key_checked(random_key, checked_ranges):
                     break
                 attempts += 1
                 if attempts > 1000:
@@ -159,16 +178,26 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
             if generate_address(random_hex) == target_address:
                 print(f"\n{Colors.GREEN}Ключ найден в случайной точке!{Colors.END}")
                 print(f"Приватный ключ: {random_hex}")
+                with open(FOUND_KEYS_FILE, "a") as f:
+                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Private: {random_hex}\n")
+                    f.write(f"Address: {target_address}\n\n")
                 break
                 
             # Проверка последовательного блока
             if found_key := check_sequential_chunk(random_key, target_address, checked_ranges):
                 print(f"\n{Colors.GREEN}Ключ найден в последовательном блоке!{Colors.END}")
                 print(f"Приватный ключ: {found_key}")
+                with open(FOUND_KEYS_FILE, "a") as f:
+                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Private: {found_key}\n")
+                    f.write(f"Address: {target_address}\n\n")
                 break
                 
             # Проверка завершения всего диапазона
-            if sum(iv.end-iv.begin for iv in checked_ranges) >= (MAIN_END - MAIN_START + 1):
+            current_coverage = sum(r['end']-r['start']+1 for r in checked_ranges)
+            total_range = MAIN_END - MAIN_START + 1
+            if current_coverage >= total_range:
                 print(f"\n{Colors.RED}Весь диапазон проверен, ключ не найден.{Colors.END}")
                 break
                 
@@ -177,20 +206,18 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
     finally:
         # Финализация
         if not stop_flag and current_chunk:
-            checked_ranges.addi(current_chunk[0], current_chunk[1]+1, {
-                'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
-            })
+            checked_ranges.append(current_chunk)
         
-        save_checked_ranges(checked_ranges)
-        total_checked = sum(iv.end-iv.begin for iv in checked_ranges)
+        save_checked_ranges(merge_ranges(checked_ranges))
+        total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
         
         print(f"\n{Colors.YELLOW}Итоги:{Colors.END}")
         print(f"Всего проверено: {total_checked:,} ключей")
         print(f"Сохранено диапазонов: {len(checked_ranges)}")
         
         if checked_ranges:
-            last_range = max(checked_ranges, key=lambda iv: iv.end)
-            print(f"Последний диапазон: {hex(last_range.begin)}-{hex(last_range.end-1)}")
+            last_range = max(checked_ranges, key=lambda x: x['end'])
+            print(f"Последний диапазон: {hex(last_range['start'])}-{hex(last_range['end'])}")
 
 if __name__ == "__main__":
     import sys
