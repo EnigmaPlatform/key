@@ -16,6 +16,7 @@ class Colors:
 
 # Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
+FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000  # 10 миллионов ключей после случайной точки
 MAIN_START = 0x400000000000000000
 MAIN_END = 0x7fffffffffffffffff
@@ -81,7 +82,7 @@ def generate_address(private_key_hex):
         
         # Формирование адреса
         extended_hash = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()[:4]
         address = base58.b58encode(extended_hash + checksum).decode('utf-8')
         
         return address
@@ -104,7 +105,7 @@ def log_success(private_key_hex, address):
     """
     print(message)
     
-    with open("found_keys.txt", "a") as f:
+    with open(FOUND_KEYS_FILE, "a") as f:
         f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}]")
         f.write(f"\nPrivate: {private_key_hex}")
         f.write(f"\nAddress: {address}")
@@ -116,7 +117,7 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
     found_key = None
     
     # Прогресс-бар для текущего блока
-    with tqdm(total=CHUNK_SIZE, desc=f"Checking {hex(start_key)}-{hex(end_key)}", unit="key") as pbar:
+    with tqdm(total=end_key - start_key + 1, desc=f"Checking {hex(start_key)}-{hex(end_key)}", unit="key") as pbar:
         current = start_key
         while current <= end_key:
             private_hex = format(current, '064x')
@@ -140,16 +141,35 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
     
     return found_key
 
+def validate_bitcoin_address(address):
+    """Проверяет валидность Bitcoin-адреса"""
+    try:
+        decoded = base58.b58decode(address)
+        if len(decoded) != 25:
+            return False
+        checksum = decoded[-4:]
+        calculated_checksum = hashlib.sha256(hashlib.sha256(decoded[:-4]).digest()).digest()[:4]
+        return checksum == calculated_checksum
+    except Exception:
+        return False
+
 def main():
     target_address = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
+    
+    # Проверяем валидность адреса
+    if not validate_bitcoin_address(target_address):
+        logger.error(f"{Colors.RED}Неверный Bitcoin-адрес{Colors.END}")
+        return
+    
     checked_ranges = load_checked_ranges()
-    total_checked = 0
+    total_checked = sum(r['end'] - r['start'] + 1 for r in checked_ranges)
     
     logger.info(f"\n{Colors.YELLOW}=== HYBRID BTC KEY FINDER ==={Colors.END}")
     logger.info(f"Целевой адрес: {target_address}")
     logger.info(f"Диапазон: {hex(MAIN_START)} - {hex(MAIN_END)}")
     logger.info(f"Размер блока: {CHUNK_SIZE:,} ключей")
     logger.info(f"Загружено диапазонов: {len(checked_ranges)}")
+    logger.info(f"Уже проверено ключей: {total_checked:,}")
 
     try:
         while True:
