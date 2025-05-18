@@ -6,7 +6,6 @@ import time
 import logging
 import json
 import os
-from multiprocessing import Pool, cpu_count, Manager, Lock
 from tqdm import tqdm
 
 class Colors:
@@ -15,232 +14,170 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Configuration
+# Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
-CHUNK_SIZE = 10_000_000  # 10 million keys per sequential block
-RANDOM_ATTEMPTS = 100    # Random keys to check between chunks
+CHUNK_SIZE = 10_000_000  # 10 миллионов ключей после случайной точки
+MAIN_START = 0x400000000000000000
+MAIN_END = 0x7fffffffffffffffff
 
+# Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('btc_key_finder.log'),
+        logging.FileHandler('btc_finder.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 def load_checked_ranges():
-    """Load previously checked ranges from file"""
+    """Загружает проверенные диапазоны из файла"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
                 return json.load(f)
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка загрузки файла прогресса: {e}")
             return []
     return []
 
 def save_checked_ranges(ranges):
-    """Save checked ranges to file"""
-    with open(CHECKPOINT_FILE, 'w') as f:
-        json.dump(ranges, f, indent=2)
+    """Сохраняет проверенные диапазоны в файл"""
+    try:
+        with open(CHECKPOINT_FILE, 'w') as f:
+            json.dump(ranges, f, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения прогресса: {e}")
 
-def is_key_in_ranges(key_int, ranges):
-    """Check if key falls within any checked range"""
-    for r in ranges:
+def is_key_checked(key_int, checked_ranges):
+    """Проверяет, был ли ключ или его диапазон уже проверен"""
+    for r in checked_ranges:
         if r['start'] <= key_int <= r['end']:
             return True
     return False
 
-def find_available_chunk(start_int, end_int, checked_ranges, chunk_size):
-    """Find next available chunk of keys to check"""
-    current_pos = start_int
-    
-    while current_pos < end_int:
-        chunk_end = min(current_pos + chunk_size - 1, end_int)
+def generate_address(private_key_hex):
+    """Генерирует Bitcoin-адрес из приватного ключа"""
+    try:
+        # Валидация ключа
+        if len(private_key_hex) != 64:
+            raise ValueError("Некорректная длина ключа")
         
-        # Check if this chunk overlaps with any checked ranges
-        overlap = False
-        for r in checked_ranges:
-            if not (chunk_end < r['start'] or current_pos > r['end']):
-                overlap = True
-                current_pos = r['end'] + 1  # Skip past this range
-                break
-                
-        if not overlap:
-            return current_pos, chunk_end
-            
-    return None, None  # No available chunks left
+        # Конвертация в ECDSA ключ
+        private_key_bytes = bytes.fromhex(private_key_hex)
+        sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
+        vk = sk.get_verifying_key()
+        
+        # Compressed public key
+        x = vk.pubkey.point.x()
+        y = vk.pubkey.point.y()
+        prefix = '02' if y % 2 == 0 else '03'
+        public_key_compressed = bytes.fromhex(prefix + "%064x" % x)
+        
+        # Хеширование
+        sha256 = hashlib.sha256(public_key_compressed).digest()
+        ripemd160 = hashlib.new('ripemd160', sha256).digest()
+        
+        # Формирование адреса
+        extended_hash = b'\x00' + ripemd160
+        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()[:4]
+        address = base58.b58encode(extended_hash + checksum).decode('utf-8')
+        
+        return address
+    except Exception as e:
+        logger.error(f"{Colors.RED}Ошибка генерации адреса: {e}{Colors.END}")
+        return None
 
-def log_success(private_key_hex, btc_address):
-    """Log found key with visual formatting"""
+def log_success(private_key_hex, address):
+    """Логирует найденный ключ"""
     message = f"""
     {Colors.GREEN}
     ╔═══════════════════════════════════════════════════╗
-    ║                KEY FOUND!                         ║
+    ║                КЛЮЧ НАЙДЕН!                       ║
     ╠═══════════════════════════════════════════════════╣
-    ║ Private Key (HEX): {private_key_hex[:32]}...{private_key_hex[-32:]} ║
-    ║ Bitcoin Address:   {btc_address} ║
-    ║ Time Found:        {time.strftime('%Y-%m-%d %H:%M:%S')} ║
+    ║ Приватный ключ: {private_key_hex[:32]}...{private_key_hex[-32:]} ║
+    ║ Адрес:          {address} ║
+    ║ Время:          {time.strftime('%Y-%m-%d %H:%M:%S')} ║
     ╚═══════════════════════════════════════════════════╝
     {Colors.END}
     """
     print(message)
     
-    with open("found_key.txt", "a") as f:
-        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-        f.write(f"Private Key: {private_key_hex}\n")
-        f.write(f"Address: {btc_address}\n")
-        f.write("-"*50 + "\n\n")
+    with open("found_keys.txt", "a") as f:
+        f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}]")
+        f.write(f"\nPrivate: {private_key_hex}")
+        f.write(f"\nAddress: {address}")
+        f.write("\n" + "="*50 + "\n")
 
-def generate_compressed_address(private_key_hex):
-    """Generate compressed Bitcoin address from private key"""
-    try:
-        if len(private_key_hex) != 64:
-            raise ValueError("Invalid key length")
-        
-        private_key_bytes = bytes.fromhex(private_key_hex)
-        sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
-        vk = sk.get_verifying_key()
-        x = vk.pubkey.point.x()
-        y = vk.pubkey.point.y()
-        
-        public_key_compressed = bytes.fromhex("02" + "%064x" % x) if y % 2 == 0 else bytes.fromhex("03" + "%064x" % x)
-        
-        sha256 = hashlib.sha256(public_key_compressed).digest()
-        ripemd160 = hashlib.new('ripemd160')
-        ripemd160.update(sha256)
-        pubkey_hash = ripemd160.digest()
-        
-        extended_hash = b'\x00' + pubkey_hash
-        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()).digest()[:4]
-        address = base58.b58encode(extended_hash + checksum).decode('utf-8')
-        
-        return address
-    
-    except Exception as e:
-        logger.error(f"{Colors.RED}Address generation error: {e}{Colors.END}")
-        return None
-
-def check_key(private_key_hex, target_address):
-    """Check if single key matches target"""
-    address = generate_compressed_address(private_key_hex)
-    return address == target_address
-
-def check_random_keys(start_int, end_int, target_address, checked_ranges, num_attempts):
-    """Check random keys not in checked ranges"""
-    keys_checked = 0
+def check_sequential_chunk(start_key, target_address, checked_ranges):
+    """Проверяет последовательный блок ключей"""
+    end_key = min(start_key + CHUNK_SIZE - 1, MAIN_END)
     found_key = None
     
-    for _ in range(num_attempts):
-        random_int = random.randint(start_int, end_int)
-        
-        # Ensure we don't check keys in already scanned ranges
-        while is_key_in_ranges(random_int, checked_ranges):
-            random_int = random.randint(start_int, end_int)
+    # Прогресс-бар для текущего блока
+    with tqdm(total=CHUNK_SIZE, desc=f"Checking {hex(start_key)}-{hex(end_key)}", unit="key") as pbar:
+        current = start_key
+        while current <= end_key:
+            private_hex = format(current, '064x')
+            address = generate_address(private_hex)
             
-        private_key_hex = format(random_int, '064x')
-        if check_key(private_key_hex, target_address):
-            found_key = private_key_hex
-            break
-        keys_checked += 1
-        
-    return found_key, keys_checked
-
-def check_sequential_chunk(start_int, end_int, target_address, checked_ranges):
-    """Check sequential chunk of keys"""
-    current = start_int
-    found_key = None
-    keys_checked = 0
+            if address == target_address:
+                found_key = private_hex
+                break
+                
+            current += 1
+            pbar.update(1)
     
-    while current <= end_int and not found_key:
-        private_key_hex = format(current, '064x')
-        if check_key(private_key_hex, target_address):
-            found_key = private_key_hex
-            break
-        current += 1
-        keys_checked += 1
-        
-    return found_key, keys_checked, start_int, current - 1
+    # Сохраняем проверенный диапазон
+    if not found_key:
+        checked_ranges.append({
+            'start': start_key,
+            'end': end_key,
+            'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
+        })
+        save_checked_ranges(checked_ranges)
+    
+    return found_key
 
 def main():
     target_address = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
-    start_range = "0000000000000000000000000000000000000000000000400000000000000000"
-    end_range = "00000000000000000000000000000000000000000000007fffffffffffffffff"
-    
-    start_int = int(start_range, 16)
-    end_int = int(end_range, 16)
-    total_keys = end_int - start_int + 1
-    
     checked_ranges = load_checked_ranges()
+    total_checked = 0
     
-    logger.info(f"\n{Colors.YELLOW}=== BTC PRIVATE KEY FINDER ==={Colors.END}")
-    logger.info(f"Target Address: {target_address}")
-    logger.info(f"Search Range: {start_range} to {end_range}")
-    logger.info(f"Total Keys: {total_keys:,}")
-    logger.info(f"Chunk Size: {CHUNK_SIZE:,} keys")
-    logger.info(f"CPU Cores: {cpu_count()}")
-    logger.info(f"Loaded {len(checked_ranges)} checked ranges")
-
-    start_time = time.time()
-    keys_checked_total = 0
-    found = False
+    logger.info(f"\n{Colors.YELLOW}=== HYBRID BTC KEY FINDER ==={Colors.END}")
+    logger.info(f"Целевой адрес: {target_address}")
+    logger.info(f"Диапазон: {hex(MAIN_START)} - {hex(MAIN_END)}")
+    logger.info(f"Размер блока: {CHUNK_SIZE:,} ключей")
+    logger.info(f"Загружено диапазонов: {len(checked_ranges)}")
 
     try:
-        with tqdm(total=total_keys, desc="Progress") as pbar:
-            while not found and keys_checked_total < total_keys:
-                # Step 1: Check random keys
-                found_key, keys_checked = check_random_keys(
-                    start_int, end_int, target_address, checked_ranges, RANDOM_ATTEMPTS
-                )
-                keys_checked_total += keys_checked
-                pbar.update(keys_checked)
-                
-                if found_key:
-                    log_success(found_key, target_address)
-                    found = True
+        while True:
+            # 1. Генерация случайного непроверенного ключа
+            while True:
+                random_key = random.randint(MAIN_START, MAIN_END)
+                if not is_key_checked(random_key, checked_ranges):
                     break
-                
-                # Step 2: Find and check next available chunk
-                chunk_start, chunk_end = find_available_chunk(
-                    start_int, end_int, checked_ranges, CHUNK_SIZE
-                )
-                
-                if chunk_start is None:
-                    logger.info("All available chunks checked")
-                    break
-                
-                logger.info(f"Checking chunk: {hex(chunk_start)} to {hex(chunk_end)}")
-                
-                found_key, keys_checked, chunk_actual_start, chunk_actual_end = check_sequential_chunk(
-                    chunk_start, chunk_end, target_address, checked_ranges
-                )
-                keys_checked_total += keys_checked
-                pbar.update(keys_checked)
-                
-                # Save the checked chunk
-                checked_ranges.append({
-                    'start': chunk_actual_start,
-                    'end': chunk_actual_end,
-                    'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
-                })
-                save_checked_ranges(checked_ranges)
-                
-                if found_key:
-                    log_success(found_key, target_address)
-                    found = True
-                    break
-
+            
+            # 2. Проверка самого случайного ключа
+            random_hex = format(random_key, '064x')
+            if (address := generate_address(random_hex)) == target_address:
+                log_success(random_hex, address)
+                break
+            total_checked += 1
+            
+            # 3. Проверка последующих 10M ключей
+            if (found_key := check_sequential_chunk(random_key, target_address, checked_ranges)):
+                log_success(found_key, target_address)
+                break
+            total_checked += CHUNK_SIZE
+            
     except KeyboardInterrupt:
-        logger.info(f"{Colors.YELLOW}Search stopped by user{Colors.END}")
+        logger.info(f"{Colors.YELLOW}\nПоиск остановлен пользователем{Colors.END}")
     finally:
-        elapsed_time = time.time() - start_time
-        logger.info(f"\nTotal keys checked: {keys_checked_total:,}")
-        logger.info(f"Time elapsed: {elapsed_time:.2f} seconds")
-        if elapsed_time > 0:
-            logger.info(f"Speed: {keys_checked_total/elapsed_time:,.2f} keys/sec")
-        if not found:
-            logger.info(f"{Colors.RED}No matching key found{Colors.END}")
+        logger.info(f"Всего проверено ключей: {total_checked:,}")
+        logger.info(f"Сохранено диапазонов: {len(checked_ranges)}")
+        logger.info("Прогресс сохранен в файл")
 
 if __name__ == "__main__":
     main()
