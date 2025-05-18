@@ -4,15 +4,21 @@ import base58
 import ecdsa
 import time
 import logging
+import json
+import os
 from multiprocessing import Pool, cpu_count, Manager, Lock
 from tqdm import tqdm
-import sys
 
 class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
     YELLOW = '\033[93m'
     END = '\033[0m'
+
+# Configuration
+CHECKPOINT_FILE = "checked_ranges.json"
+CHUNK_SIZE = 10_000_000  # 10 million keys per sequential block
+RANDOM_ATTEMPTS = 100    # Random keys to check between chunks
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,16 +30,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_checked_ranges():
+    """Load previously checked ranges from file"""
+    if os.path.exists(CHECKPOINT_FILE):
+        try:
+            with open(CHECKPOINT_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_checked_ranges(ranges):
+    """Save checked ranges to file"""
+    with open(CHECKPOINT_FILE, 'w') as f:
+        json.dump(ranges, f, indent=2)
+
+def is_key_in_ranges(key_int, ranges):
+    """Check if key falls within any checked range"""
+    for r in ranges:
+        if r['start'] <= key_int <= r['end']:
+            return True
+    return False
+
+def find_available_chunk(start_int, end_int, checked_ranges, chunk_size):
+    """Find next available chunk of keys to check"""
+    current_pos = start_int
+    
+    while current_pos < end_int:
+        chunk_end = min(current_pos + chunk_size - 1, end_int)
+        
+        # Check if this chunk overlaps with any checked ranges
+        overlap = False
+        for r in checked_ranges:
+            if not (chunk_end < r['start'] or current_pos > r['end']):
+                overlap = True
+                current_pos = r['end'] + 1  # Skip past this range
+                break
+                
+        if not overlap:
+            return current_pos, chunk_end
+            
+    return None, None  # No available chunks left
+
 def log_success(private_key_hex, btc_address):
-    """Функция для вывода сообщения о найденном совпадении"""
+    """Log found key with visual formatting"""
     message = f"""
     {Colors.GREEN}
     ╔═══════════════════════════════════════════════════╗
-    ║                КЛЮЧ НАЙДЕН!                       ║
+    ║                KEY FOUND!                         ║
     ╠═══════════════════════════════════════════════════╣
-    ║ Приватный ключ (HEX): {private_key_hex} ║
-    ║ Bitcoin-адрес:       {btc_address} ║
-    ║ Время обнаружения:   {time.strftime('%Y-%m-%d %H:%M:%S')} ║
+    ║ Private Key (HEX): {private_key_hex[:32]}...{private_key_hex[-32:]} ║
+    ║ Bitcoin Address:   {btc_address} ║
+    ║ Time Found:        {time.strftime('%Y-%m-%d %H:%M:%S')} ║
     ╚═══════════════════════════════════════════════════╝
     {Colors.END}
     """
@@ -41,143 +89,158 @@ def log_success(private_key_hex, btc_address):
     
     with open("found_key.txt", "a") as f:
         f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-        f.write(f"Private Key (HEX): {private_key_hex}\n")
+        f.write(f"Private Key: {private_key_hex}\n")
         f.write(f"Address: {btc_address}\n")
-        f.write("-" * 50 + "\n\n")
+        f.write("-"*50 + "\n\n")
 
 def generate_compressed_address(private_key_hex):
-    """Генерирует compressed Bitcoin address"""
+    """Generate compressed Bitcoin address from private key"""
     try:
-        # Валидация ключа
         if len(private_key_hex) != 64:
             raise ValueError("Invalid key length")
         
         private_key_bytes = bytes.fromhex(private_key_hex)
-        
-        # Генерация публичного ключа (compressed)
         sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
         vk = sk.get_verifying_key()
         x = vk.pubkey.point.x()
         y = vk.pubkey.point.y()
         
-        # Compressed public key (используем четность y)
-        if y % 2 == 0:
-            public_key_compressed = bytes.fromhex("02" + "%064x" % x)
-        else:
-            public_key_compressed = bytes.fromhex("03" + "%064x" % x)
+        public_key_compressed = bytes.fromhex("02" + "%064x" % x) if y % 2 == 0 else bytes.fromhex("03" + "%064x" % x)
         
-        # SHA-256 + RIPEMD-160
         sha256 = hashlib.sha256(public_key_compressed).digest()
         ripemd160 = hashlib.new('ripemd160')
         ripemd160.update(sha256)
         pubkey_hash = ripemd160.digest()
         
-        # Добавляем префикс сети (0x00 для mainnet)
-        network_byte = b'\x00'
-        extended_hash = network_byte + pubkey_hash
-        
-        # Контрольная сумма
+        extended_hash = b'\x00' + pubkey_hash
         checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()).digest()[:4]
-        binary_address = extended_hash + checksum
-        
-        # Base58 encoding
-        address = base58.b58encode(binary_address).decode('utf-8')
+        address = base58.b58encode(extended_hash + checksum).decode('utf-8')
         
         return address
     
     except Exception as e:
-        logger.error(f"{Colors.RED}Ошибка генерации адреса: {e}{Colors.END}")
+        logger.error(f"{Colors.RED}Address generation error: {e}{Colors.END}")
         return None
 
-def test_compressed_generation():
-    """Тест compressed адресов"""
-    test_keys = [
-        "000000000000000000000000000000000000000000000000000000000001654f",
-        "0000000000000000000000000000000000000000000000000000000000016a4f",
-        "000000000000000000000000000000000000000000000000000000000001704f"
-    ]
-    
-    logger.info(f"\n{Colors.YELLOW}=== ТЕСТ COMPRESSED АДРЕСОВ ==={Colors.END}")
-    for key in test_keys:
-        address = generate_compressed_address(key)
-        logger.info(f"Ключ: {key} -> Адрес: {address}")
+def check_key(private_key_hex, target_address):
+    """Check if single key matches target"""
+    address = generate_compressed_address(private_key_hex)
+    return address == target_address
 
-def worker(args):
-    """Функция для worker-процессов"""
-    start_int, end_int, target_address, found_flag, counter, lock, chunk_size = args
+def check_random_keys(start_int, end_int, target_address, checked_ranges, num_attempts):
+    """Check random keys not in checked ranges"""
+    keys_checked = 0
+    found_key = None
+    
+    for _ in range(num_attempts):
+        random_int = random.randint(start_int, end_int)
+        
+        # Ensure we don't check keys in already scanned ranges
+        while is_key_in_ranges(random_int, checked_ranges):
+            random_int = random.randint(start_int, end_int)
+            
+        private_key_hex = format(random_int, '064x')
+        if check_key(private_key_hex, target_address):
+            found_key = private_key_hex
+            break
+        keys_checked += 1
+        
+    return found_key, keys_checked
+
+def check_sequential_chunk(start_int, end_int, target_address, checked_ranges):
+    """Check sequential chunk of keys"""
+    current = start_int
+    found_key = None
     keys_checked = 0
     
-    while not found_flag.value and keys_checked < chunk_size:
-        random_int = random.randint(start_int, end_int)
-        private_key_hex = format(random_int, '064x')
-        btc_address = generate_compressed_address(private_key_hex)
+    while current <= end_int and not found_key:
+        private_key_hex = format(current, '064x')
+        if check_key(private_key_hex, target_address):
+            found_key = private_key_hex
+            break
+        current += 1
+        keys_checked += 1
         
-        with lock:
-            counter.value += 1
-            keys_checked += 1
-            
-        if btc_address and btc_address == target_address:
-            # Используем глобальную функцию log_success
-            log_success(private_key_hex, btc_address)
-            found_flag.value = True
-            return (private_key_hex, keys_checked)
-    
-    return (None, keys_checked)
+    return found_key, keys_checked, start_int, current - 1
 
 def main():
-    # Тестирование compressed адресов
-    test_compressed_generation()
-    
-    target_address = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"  # Ваш compressed адрес
+    target_address = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
     start_range = "0000000000000000000000000000000000000000000000400000000000000000"
     end_range = "00000000000000000000000000000000000000000000007fffffffffffffffff"
-
-    # Проверка и инициализация
+    
     start_int = int(start_range, 16)
     end_int = int(end_range, 16)
     total_keys = end_int - start_int + 1
-    chunk_size = 100000
-
-    logger.info(f"\n{Colors.YELLOW}=== ПОИСК СОВПАДЕНИЙ ==={Colors.END}")
-    logger.info(f"Ищем: {target_address}")
-    logger.info(f"Диапазон: {start_range} - {end_range}")
-    logger.info(f"Всего ключей: {total_keys}")
+    
+    checked_ranges = load_checked_ranges()
+    
+    logger.info(f"\n{Colors.YELLOW}=== BTC PRIVATE KEY FINDER ==={Colors.END}")
+    logger.info(f"Target Address: {target_address}")
+    logger.info(f"Search Range: {start_range} to {end_range}")
+    logger.info(f"Total Keys: {total_keys:,}")
+    logger.info(f"Chunk Size: {CHUNK_SIZE:,} keys")
+    logger.info(f"CPU Cores: {cpu_count()}")
+    logger.info(f"Loaded {len(checked_ranges)} checked ranges")
 
     start_time = time.time()
-    
-    with Manager() as manager:
-        found_flag = manager.Value('b', False)
-        counter = manager.Value('i', 0)
-        lock = manager.Lock()
-        
-        try:
-            with tqdm(total=total_keys, desc="Прогресс", unit="key") as pbar:
-                with Pool(processes=cpu_count()) as pool:
-                    args = [(start_int, end_int, target_address, found_flag, counter, lock, chunk_size) 
-                           for _ in range(cpu_count())]
-                    
-                    while not found_flag.value and pbar.n < total_keys:
-                        results = pool.imap_unordered(worker, args)
-                        total_checked = 0
-                        
-                        for result, checked in results:
-                            total_checked += checked
-                            if result is not None:
-                                break
-                        
-                        pbar.update(total_checked)
-                        
-                        if found_flag.value:
-                            break
+    keys_checked_total = 0
+    found = False
 
-        except KeyboardInterrupt:
-            logger.info(f"{Colors.YELLOW}Остановлено пользователем{Colors.END}")
-        finally:
-            elapsed_time = time.time() - start_time
-            logger.info(f"\nПроверено ключей: {counter.value}")
-            logger.info(f"Затрачено времени: {elapsed_time:.2f} сек")
-            if not found_flag.value:
-                logger.info(f"{Colors.RED}Совпадений не найдено{Colors.END}")
+    try:
+        with tqdm(total=total_keys, desc="Progress") as pbar:
+            while not found and keys_checked_total < total_keys:
+                # Step 1: Check random keys
+                found_key, keys_checked = check_random_keys(
+                    start_int, end_int, target_address, checked_ranges, RANDOM_ATTEMPTS
+                )
+                keys_checked_total += keys_checked
+                pbar.update(keys_checked)
+                
+                if found_key:
+                    log_success(found_key, target_address)
+                    found = True
+                    break
+                
+                # Step 2: Find and check next available chunk
+                chunk_start, chunk_end = find_available_chunk(
+                    start_int, end_int, checked_ranges, CHUNK_SIZE
+                )
+                
+                if chunk_start is None:
+                    logger.info("All available chunks checked")
+                    break
+                
+                logger.info(f"Checking chunk: {hex(chunk_start)} to {hex(chunk_end)}")
+                
+                found_key, keys_checked, chunk_actual_start, chunk_actual_end = check_sequential_chunk(
+                    chunk_start, chunk_end, target_address, checked_ranges
+                )
+                keys_checked_total += keys_checked
+                pbar.update(keys_checked)
+                
+                # Save the checked chunk
+                checked_ranges.append({
+                    'start': chunk_actual_start,
+                    'end': chunk_actual_end,
+                    'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
+                })
+                save_checked_ranges(checked_ranges)
+                
+                if found_key:
+                    log_success(found_key, target_address)
+                    found = True
+                    break
+
+    except KeyboardInterrupt:
+        logger.info(f"{Colors.YELLOW}Search stopped by user{Colors.END}")
+    finally:
+        elapsed_time = time.time() - start_time
+        logger.info(f"\nTotal keys checked: {keys_checked_total:,}")
+        logger.info(f"Time elapsed: {elapsed_time:.2f} seconds")
+        if elapsed_time > 0:
+            logger.info(f"Speed: {keys_checked_total/elapsed_time:,.2f} keys/sec")
+        if not found:
+            logger.info(f"{Colors.RED}No matching key found{Colors.END}")
 
 if __name__ == "__main__":
     main()
