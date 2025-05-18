@@ -141,7 +141,7 @@ def signal_handler(sig, frame):
     print(f"\n{Colors.YELLOW}Получен сигнал прерывания...{Colors.END}")
     stop_flag = True
 
-def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
+def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
     """Основная функция поиска"""
     global stop_flag
     
@@ -221,4 +221,4 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
 
 if __name__ == "__main__":
     import sys
-    main(sys.argv[1] if len(sys.argv) > 1 else "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR")
+    main(sys.argv[1] if len(sys.argv) > 1 else "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU")
