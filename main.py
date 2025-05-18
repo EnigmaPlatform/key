@@ -18,8 +18,8 @@ class Colors:
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000  # 10 миллионов ключей после случайной точки
-MAIN_START = 0x400000000000000000
-MAIN_END = 0x7fffffffffffffffff
+MAIN_START = 0x349b84b6430a6c4ef1
+MAIN_END = 0x349b84b6431a6c4ef1
 
 # Настройка логгирования
 logging.basicConfig(
@@ -202,4 +202,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         main(sys.argv[1])
     else:
-        main("1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU")
+        main("19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR")
