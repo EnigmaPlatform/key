@@ -82,7 +82,7 @@ def generate_address(private_key_hex):
         
         # Формирование адреса
         extended_hash = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()).digest()[:4]
         address = base58.b58encode(extended_hash + checksum).decode('utf-8')
         
         return address
@@ -153,9 +153,7 @@ def validate_bitcoin_address(address):
     except Exception:
         return False
 
-def main():
-    target_address = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
-    
+def main(target_address):
     # Проверяем валидность адреса
     if not validate_bitcoin_address(target_address):
         logger.error(f"{Colors.RED}Неверный Bitcoin-адрес{Colors.END}")
@@ -200,4 +198,8 @@ def main():
         logger.info("Прогресс сохранен в файл")
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1:
+        main(sys.argv[1])
+    else:
+        main("1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU")
