@@ -1,3 +1,4 @@
+
 import hashlib
 import random
 import base58
@@ -16,12 +17,11 @@ class Colors:
 # Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 100_000_000
-MAIN_START = 0x6937096C8634089DE2
-MAIN_END = 0x6937096C8634D89DE2
+CHUNK_SIZE = 10_000_000
+MAIN_START = 0x400000000000000000
+MAIN_END = 0x7fffffffffffffffff
 
 def load_checked_ranges():
-    """Загружает проверенные диапазоны из файла"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
@@ -31,38 +31,16 @@ def load_checked_ranges():
     return []
 
 def save_checked_ranges(ranges):
-    """Сохраняет проверенные диапазоны в файл"""
     with open(CHECKPOINT_FILE, 'w') as f:
         json.dump(ranges, f, indent=2)
 
 def is_key_checked(key_int, checked_ranges):
-    """Проверяет, был ли ключ уже проверен"""
     for r in checked_ranges:
         if r['start'] <= key_int <= r['end']:
             return True
     return False
 
-def is_range_fully_checked(checked_ranges):
-    """Проверяет, полностью ли проверен весь диапазон"""
-    if not checked_ranges:
-        return False
-    
-    # Сортируем диапазоны по начальному значению
-    sorted_ranges = sorted(checked_ranges, key=lambda x: x['start'])
-    
-    # Проверяем покрытие от MAIN_START до MAIN_END
-    current_pos = MAIN_START
-    for r in sorted_ranges:
-        if r['start'] > current_pos:
-            return False
-        if r['end'] >= current_pos:
-            current_pos = r['end'] + 1
-        if current_pos > MAIN_END:
-            return True
-    return current_pos > MAIN_END
-
 def generate_address(private_key_hex):
-    """Генерирует Bitcoin-адрес из приватного ключа"""
     try:
         private_key_bytes = bytes.fromhex(private_key_hex)
         sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
@@ -83,7 +61,6 @@ def generate_address(private_key_hex):
         return None
 
 def log_success(private_key_hex, address):
-    """Логирует найденный ключ"""
     print(f"\n{Colors.GREEN}Найден ключ!{Colors.END}")
     print(f"Приватный: {private_key_hex}")
     print(f"Адрес: {address}\n")
@@ -94,12 +71,14 @@ def log_success(private_key_hex, address):
         f.write(f"Address: {address}\n\n")
 
 def check_sequential_chunk(start_key, target_address, checked_ranges):
-    """Проверяет последовательный блок ключей"""
     end_key = min(start_key + CHUNK_SIZE - 1, MAIN_END)
     found_key = None
     
-    with tqdm(total=end_key-start_key+1, desc=f"Range {hex(start_key)[:10]}...", 
-             bar_format="{desc}: {percentage:.1f}%|{bar}| {n_fmt}/{total_fmt}") as pbar:
+    # Настройка прогресс-бара с обновлением каждые 1000 ключей
+    with tqdm(total=end_key-start_key+1, 
+             desc=f"Диапазон {hex(start_key)[2:10]}...", 
+             mininterval=2,  # Минимальный интервал обновления (секунды)
+             bar_format="{desc}: {percentage:.1f}%|{bar}| {n_fmt}/{total_fmt} [Осталось: {remaining}]") as pbar:
         
         current = start_key
         while current <= end_key:
@@ -108,7 +87,12 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
                 found_key = private_hex
                 break
             current += 1
-            pbar.update(1)
+            if current % 1000 == 0:  # Обновляем только каждые 1000 ключей
+                pbar.update(1000)
+        
+        # Обновляем оставшиеся ключи
+        if current % 1000 != 0:
+            pbar.update(current % 1000)
     
     if not found_key:
         checked_ranges.append({
@@ -121,32 +105,19 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
     return found_key
 
 def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
-    """Основная функция поиска"""
     checked_ranges = load_checked_ranges()
     total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
     
     print(f"{Colors.YELLOW}Поиск ключа для адреса: {target_address}{Colors.END}")
     print(f"Уже проверено: {total_checked:,} ключей")
-    
-    # Проверяем, не проверен ли уже весь диапазон
-    if is_range_fully_checked(checked_ranges):
-        print(f"\n{Colors.RED}Внимание! Весь диапазон уже проверен, ключ не найден.{Colors.END}")
-        print("Попробуйте изменить параметры поиска или целевой адрес.")
-        return
+    print(f"Размер блока: {CHUNK_SIZE:,} ключей\n")
 
     try:
         while True:
             # Генерация случайного непроверенного ключа
-            attempts = 0
-            while True:
-                random_key = random.randint(MAIN_START, MAIN_END)
-                if not is_key_checked(random_key, checked_ranges):
-                    break
-                attempts += 1
-                if attempts > 1000:
-                    print(f"\n{Colors.RED}Не удалось найти непроверенный ключ после 1000 попыток.{Colors.END}")
-                    print("Возможно, весь диапазон уже проверен.")
-                    return
+            random_key = random.randint(MAIN_START, MAIN_END)
+            if is_key_checked(random_key, checked_ranges):
+                continue
             
             # Проверка случайного ключа
             random_hex = format(random_key, '064x')
@@ -159,21 +130,22 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
                 log_success(found_key, target_address)
                 break
             
-            # Обновляем счетчик проверенных ключей
-            total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
-            
-            # Проверяем, не проверен ли теперь весь диапазон
-            if is_range_fully_checked(checked_ranges):
+            # Проверяем, не проверен ли весь диапазон
+            current_coverage = sum(r['end']-r['start']+1 for r in checked_ranges)
+            total_range = MAIN_END - MAIN_START + 1
+            if current_coverage >= total_range:
                 print(f"\n{Colors.RED}Весь диапазон проверен, ключ не найден.{Colors.END}")
                 break
             
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Поиск остановлен пользователем{Colors.END}")
     finally:
-        print(f"\nИтоги поиска:")
-        print(f"Всего проверено: {total_checked:,} ключей")
+        print(f"\nИтоги:")
+        print(f"Всего проверено: {total_checked + CHUNK_SIZE:,} ключей")
         print(f"Сохранено диапазонов: {len(checked_ranges)}")
-        print(f"Последний проверенный диапазон: {hex(checked_ranges[-1]['start'])}-{hex(checked_ranges[-1]['end'])}")
+        if checked_ranges:
+            last_range = checked_ranges[-1]
+            print(f"Последний диапазон: {hex(last_range['start'])}-{hex(last_range['end'])}")
 
 if __name__ == "__main__":
     import sys
