@@ -18,7 +18,7 @@ class Colors:
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000  # 10 миллионов ключей после случайной точки
-MAIN_START = 0x349b84b6430a6c4ef1
+MAIN_START = 0x349b84b643176c4ef1
 MAIN_END = 0x349b84b6431a6c4ef1
 
 # Настройка логгирования
