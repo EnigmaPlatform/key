@@ -81,7 +81,7 @@ def generate_address(private_key_hex):
         
         # Формирование адреса
         extended_hash = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
         address = base58.b58encode(extended_hash + checksum).decode('utf-8')
         
         return address
