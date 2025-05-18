@@ -28,141 +28,9 @@ jobs:
         sudo apt-get install -y python3-dev libssl-dev
         pip install ecdsa base58 tqdm
 
-    - name: Create and run hybrid finder
+    - name: Run hybrid finder
       run: |
-        cat << 'EOF' > btc_hybrid_finder.py
-        import hashlib
-        import random
-        import base58
-        import ecdsa
-        import time
-        import logging
-        import json
-        import os
-        from tqdm import tqdm
-
-        # Constants
-        CHECKPOINT_FILE = "hybrid_ranges.json"
-        CHUNK_SIZE = 10_000_000  # 10M keys after random point
-        MAIN_START = 0x400000000000000000
-        MAIN_END = 0x7fffffffffffffffff
-
-        # Logging setup
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('hybrid_finder.log'),
-                logging.StreamHandler()
-            ]
-        )
-        logger = logging.getLogger(__name__)
-
-        def load_progress():
-            """Load checked ranges from file"""
-            if os.path.exists(CHECKPOINT_FILE):
-                try:
-                    with open(CHECKPOINT_FILE, 'r') as f:
-                        return json.load(f)
-                except Exception as e:
-                    logger.error(f"Progress file error: {e}")
-                    return {"checked_ranges": []}
-            return {"checked_ranges": []}
-
-        def save_progress(progress):
-            """Save progress to file"""
-            with open(CHECKPOINT_FILE, 'w') as f:
-                json.dump(progress, f, indent=2)
-
-        def is_key_checked(key, ranges):
-            """Check if key is in any checked range"""
-            return any(r['start'] <= key <= r['end'] for r in ranges)
-
-        def generate_address(private_hex):
-            """Generate compressed Bitcoin address"""
-            try:
-                priv_bytes = bytes.fromhex(private_hex)
-                sk = ecdsa.SigningKey.from_string(priv_bytes, curve=ecdsa.SECP256k1)
-                vk = sk.get_verifying_key()
-                x, y = vk.pubkey.point.x(), vk.pubkey.point.y()
-                prefix = '02' if y % 2 == 0 else '03'
-                pubkey = bytes.fromhex(prefix + "%064x" % x)
-                
-                sha256 = hashlib.sha256(pubkey).digest()
-                ripemd160 = hashlib.new('ripemd160', sha256).digest()
-                extended = b'\x00' + ripemd160
-                checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
-                return base58.b58encode(extended + checksum).decode('utf-8')
-            except Exception as e:
-                logger.error(f"Address gen failed: {e}")
-                return None
-
-        def check_chunk(start, end, target):
-            """Check sequential chunk of keys"""
-            for current in range(start, end + 1):
-                priv_hex = format(current, '064x')
-                if generate_address(priv_hex) == target:
-                    return priv_hex
-            return None
-
-        def main():
-            target = "${{ github.event.inputs.target_address }}"
-            progress = load_progress()
-            checked_ranges = progress["checked_ranges"]
-            
-            logger.info(f"\n=== HYBRID BTC KEY FINDER ===")
-            logger.info(f"Target: {target}")
-            logger.info(f"Range: {hex(MAIN_START)}-{hex(MAIN_END)}")
-            logger.info(f"Loaded {len(checked_ranges)} checked ranges")
-
-            try:
-                while True:
-                    # 1. Generate random unchecked key
-                    while True:
-                        rand_key = random.randint(MAIN_START, MAIN_END)
-                        if not is_key_checked(rand_key, checked_ranges):
-                            break
-
-                    # 2. Check the random key itself
-                    rand_hex = format(rand_key, '064x')
-                    if (addr := generate_address(rand_hex)) == target:
-                        logger.info(f"\nFOUND IN RANDOM CHECK: {rand_hex}")
-                        with open("found_key.txt", "a") as f:
-                            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            f.write(f"Private: {rand_hex}\nAddress: {addr}\n")
-                        return
-
-                    # 3. Check next 10M keys
-                    chunk_end = min(rand_key + CHUNK_SIZE - 1, MAIN_END)
-                    logger.info(f"Checking chunk: {hex(rand_key)}-{hex(chunk_end)}")
-                    
-                    if (found := check_chunk(rand_key, chunk_end, target)):
-                        logger.info(f"\nFOUND IN CHUNK: {found}")
-                        with open("found_key.txt", "a") as f:
-                            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            f.write(f"Private: {found}\nAddress: {target}\n")
-                        return
-
-                    # 4. Save progress
-                    checked_ranges.append({
-                        "start": rand_key,
-                        "end": chunk_end,
-                        "checked_at": time.strftime('%Y-%m-%d %H:%M:%S')
-                    })
-                    progress["checked_ranges"] = checked_ranges
-                    save_progress(progress)
-
-            except KeyboardInterrupt:
-                logger.info("\nSearch stopped by user")
-            finally:
-                logger.info(f"Total chunks checked: {len(checked_ranges)}")
-                logger.info("Progress saved")
-
-        if __name__ == "__main__":
-            main()
-        EOF
-
-        python btc_hybrid_finder.py
+        python main.py "${{ github.event.inputs.target_address }}"
 
     - name: Upload results
       uses: actions/upload-artifact@v4
@@ -170,6 +38,6 @@ jobs:
       with:
         name: btc-finder-results
         path: |
-          hybrid_finder.log
-          found_key.txt
-          hybrid_ranges.json
+          btc_finder.log
+          found_keys.txt
+          checked_ranges.json
