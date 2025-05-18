@@ -1,52 +1,36 @@
-name: BTC Private Key Finder
+name: BTC Key Finder (Hybrid Mode)
 
 on:
   workflow_dispatch:
     inputs:
       target_address:
-        description: 'Target Bitcoin address (compressed)'
+        description: 'Target Bitcoin address'
         required: true
         default: '1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU'
-      start_range:
-        description: 'Start range (hex)'
-        required: true
-        default: '0000000000000000000000000000000000000000000000400000000000000000'
-      end_range:
-        description: 'End range (hex)'
-        required: true
-        default: '00000000000000000000000000000000000000000000007fffffffffffffffff'
-      chunk_size:
-        description: 'Keys checked per sequential chunk'
-        required: false
-        default: '10000000'
 
 jobs:
-  run-finder:
+  hybrid-finder:
     runs-on: ubuntu-latest
-    timeout-minutes: 1440  # 24 hours maximum runtime
+    timeout-minutes: 1440
 
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set up Python 3.10
+    - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    - name: Install system dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y python3-dev libssl-dev
-
-    - name: Install Python packages
-      run: |
-        python -m pip install --upgrade pip
         pip install ecdsa base58 tqdm
 
-    - name: Create and run BTC Finder script
+    - name: Create and run hybrid script
       run: |
-        cat > btc_finder.py << 'EOF'
+        cat << 'EOF' > btc_hybrid_finder.py
         import hashlib
         import random
         import base58
@@ -55,219 +39,103 @@ jobs:
         import logging
         import json
         import os
-        from multiprocessing import Pool, cpu_count, Manager, Lock
         from tqdm import tqdm
 
-        class Colors:
-            GREEN = '\033[92m'
-            RED = '\033[91m'
-            YELLOW = '\033[93m'
-            END = '\033[0m'
+        # Конфигурация
+        CHECKPOINT_FILE = "hybrid_ranges.json"
+        CHUNK_SIZE = 10_000_000  # 10 млн ключей после случайной точки
+        MAIN_START = 0x400000000000000000
+        MAIN_END = 0x7fffffffffffffffff
 
-        # Configuration
-        CHECKPOINT_FILE = "checked_ranges.json"
-        CHUNK_SIZE = ${{ github.event.inputs.chunk_size }}
-        RANDOM_ATTEMPTS = 100
-
+        # Настройка логгирования
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('btc_key_finder.log'),
-                logging.StreamHandler()
-            ]
+            handlers=[logging.FileHandler('hybrid_finder.log'), logging.StreamHandler()]
         )
         logger = logging.getLogger(__name__)
 
-        def load_checked_ranges():
+        def load_progress():
             if os.path.exists(CHECKPOINT_FILE):
-                try:
-                    with open(CHECKPOINT_FILE, 'r') as f:
-                        return json.load(f)
-                except:
-                    return []
-            return []
+                with open(CHECKPOINT_FILE, 'r') as f:
+                    return json.load(f)
+            return {"checked_ranges": [], "random_attempts": 0}
 
-        def save_checked_ranges(ranges):
+        def save_progress(progress):
             with open(CHECKPOINT_FILE, 'w') as f:
-                json.dump(ranges, f, indent=2)
+                json.dump(progress, f, indent=2)
 
-        def is_key_in_ranges(key_int, ranges):
-            for r in ranges:
-                if r['start'] <= key_int <= r['end']:
-                    return True
-            return False
-
-        def find_available_chunk(start_int, end_int, checked_ranges, chunk_size):
-            current_pos = start_int
-            while current_pos < end_int:
-                chunk_end = min(current_pos + chunk_size - 1, end_int)
-                overlap = False
-                for r in checked_ranges:
-                    if not (chunk_end < r['start'] or current_pos > r['end']):
-                        overlap = True
-                        current_pos = r['end'] + 1
-                        break
-                if not overlap:
-                    return current_pos, chunk_end
-            return None, None
-
-        def log_success(private_key_hex, btc_address):
-            message = f"""
-            {Colors.GREEN}
-            ╔═══════════════════════════════════════════════════╗
-            ║                KEY FOUND!                         ║
-            ╠═══════════════════════════════════════════════════╣
-            ║ Private Key (HEX): {private_key_hex[:32]}...{private_key_hex[-32:]} ║
-            ║ Bitcoin Address:   {btc_address} ║
-            ║ Time Found:        {time.strftime('%Y-%m-%d %H:%M:%S')} ║
-            ╚═══════════════════════════════════════════════════╝
-            {Colors.END}
-            """
-            print(message)
-            with open("found_key.txt", "a") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                f.write(f"Private Key: {private_key_hex}\n")
-                f.write(f"Address: {btc_address}\n")
-                f.write("-"*50 + "\n\n")
-
-        def generate_compressed_address(private_key_hex):
+        def generate_address(private_key_hex):
             try:
-                if len(private_key_hex) != 64:
-                    raise ValueError("Invalid key length")
                 private_key_bytes = bytes.fromhex(private_key_hex)
                 sk = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
                 vk = sk.get_verifying_key()
-                x = vk.pubkey.point.x()
-                y = vk.pubkey.point.y()
-                public_key_compressed = bytes.fromhex("02" + "%064x" % x) if y % 2 == 0 else bytes.fromhex("03" + "%064x" % x)
-                sha256 = hashlib.sha256(public_key_compressed).digest()
-                ripemd160 = hashlib.new('ripemd160')
-                ripemd160.update(sha256)
-                pubkey_hash = ripemd160.digest()
-                extended_hash = b'\x00' + pubkey_hash
-                checksum = hashlib.sha256(hashlib.sha256(extended_hash).digest()).digest()[:4]
-                address = base58.b58encode(extended_hash + checksum).decode('utf-8')
-                return address
+                x, y = vk.pubkey.point.x(), vk.pubkey.point.y()
+                prefix = '02' if y % 2 == 0 else '03'
+                public_key = bytes.fromhex(prefix + "%064x" % x)
+                sha256 = hashlib.sha256(public_key).digest()
+                ripemd160 = hashlib.new('ripemd160', sha256).digest()
+                extended = b'\x00' + ripemd160
+                checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
+                return base58.b58encode(extended + checksum).decode('utf-8')
             except Exception as e:
-                logger.error(f"{Colors.RED}Address generation error: {e}{Colors.END}")
+                logger.error(f"Ошибка генерации: {e}")
                 return None
 
-        def check_key(private_key_hex, target_address):
-            address = generate_compressed_address(private_key_hex)
-            return address == target_address
-
-        def check_random_keys(start_int, end_int, target_address, checked_ranges, num_attempts):
-            keys_checked = 0
-            found_key = None
-            for _ in range(num_attempts):
-                random_int = random.randint(start_int, end_int)
-                while is_key_in_ranges(random_int, checked_ranges):
-                    random_int = random.randint(start_int, end_int)
-                private_key_hex = format(random_int, '064x')
-                if check_key(private_key_hex, target_address):
-                    found_key = private_key_hex
-                    break
-                keys_checked += 1
-            return found_key, keys_checked
-
-        def check_sequential_chunk(start_int, end_int, target_address, checked_ranges):
-            current = start_int
-            found_key = None
-            keys_checked = 0
-            while current <= end_int and not found_key:
-                private_key_hex = format(current, '064x')
-                if check_key(private_key_hex, target_address):
-                    found_key = private_key_hex
-                    break
+        def check_chunk(start, end, target):
+            current = start
+            while current <= end:
+                priv_hex = format(current, '064x')
+                if generate_address(priv_hex) == target:
+                    return priv_hex
                 current += 1
-                keys_checked += 1
-            return found_key, keys_checked, start_int, current - 1
+            return None
 
         def main():
-            target_address = "${{ github.event.inputs.target_address }}"
-            start_range = "${{ github.event.inputs.start_range }}"
-            end_range = "${{ github.event.inputs.end_range }}"
-            
-            start_int = int(start_range, 16)
-            end_int = int(end_range, 16)
-            total_keys = end_int - start_int + 1
-            checked_ranges = load_checked_ranges()
-            
-            logger.info(f"\n{Colors.YELLOW}=== BTC PRIVATE KEY FINDER ==={Colors.END}")
-            logger.info(f"Target Address: {target_address}")
-            logger.info(f"Search Range: {start_range} to {end_range}")
-            logger.info(f"Total Keys: {total_keys:,}")
-            logger.info(f"Chunk Size: {CHUNK_SIZE:,} keys")
-            logger.info(f"CPU Cores: {cpu_count()}")
-            logger.info(f"Loaded {len(checked_ranges)} checked ranges")
+            target = "${ { github.event.inputs.target_address } }"
+            progress = load_progress()
+            checked_ranges = progress["checked_ranges"]
 
-            start_time = time.time()
-            keys_checked_total = 0
-            found = False
+            while True:
+                # 1. Генерируем случайную точку
+                random_key = random.randint(MAIN_START, MAIN_END)
+                
+                # 2. Проверяем саму случайную точку
+                random_hex = format(random_key, '064x')
+                if generate_address(random_hex) == target:
+                    logger.info(f"НАЙДЕНО В СЛУЧАЙНОЙ ТОЧКЕ: {random_hex}")
+                    return
 
-            try:
-                with tqdm(total=total_keys, desc="Progress") as pbar:
-                    while not found and keys_checked_total < total_keys:
-                        found_key, keys_checked = check_random_keys(
-                            start_int, end_int, target_address, checked_ranges, RANDOM_ATTEMPTS
-                        )
-                        keys_checked_total += keys_checked
-                        pbar.update(keys_checked)
-                        if found_key:
-                            log_success(found_key, target_address)
-                            found = True
-                            break
-                        
-                        chunk_start, chunk_end = find_available_chunk(
-                            start_int, end_int, checked_ranges, CHUNK_SIZE
-                        )
-                        if chunk_start is None:
-                            logger.info("All available chunks checked")
-                            break
-                        
-                        logger.info(f"Checking chunk: {hex(chunk_start)} to {hex(chunk_end)}")
-                        found_key, keys_checked, chunk_actual_start, chunk_actual_end = check_sequential_chunk(
-                            chunk_start, chunk_end, target_address, checked_ranges
-                        )
-                        keys_checked_total += keys_checked
-                        pbar.update(keys_checked)
-                        
-                        checked_ranges.append({
-                            'start': chunk_actual_start,
-                            'end': chunk_actual_end,
-                            'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
-                        })
-                        save_checked_ranges(checked_ranges)
-                        
-                        if found_key:
-                            log_success(found_key, target_address)
-                            found = True
-                            break
+                # 3. Проверяем последующие 10M ключей
+                chunk_end = min(random_key + CHUNK_SIZE - 1, MAIN_END)
+                found_key = check_chunk(random_key, chunk_end, target)
 
-            except KeyboardInterrupt:
-                logger.info(f"{Colors.YELLOW}Search stopped by user{Colors.END}")
-            finally:
-                elapsed_time = time.time() - start_time
-                logger.info(f"\nTotal keys checked: {keys_checked_total:,}")
-                logger.info(f"Time elapsed: {elapsed_time:.2f} seconds")
-                if elapsed_time > 0:
-                    logger.info(f"Speed: {keys_checked_total/elapsed_time:,.2f} keys/sec")
-                if not found:
-                    logger.info(f"{Colors.RED}No matching key found{Colors.END}")
+                if found_key:
+                    logger.info(f"НАЙДЕНО В БЛОКЕ: {found_key}")
+                    return
+
+                # 4. Сохраняем диапазон
+                checked_ranges.append({
+                    "start": random_key,
+                    "end": chunk_end,
+                    "type": "hybrid_chunk",
+                    "checked_at": time.strftime('%Y-%m-%d %H:%M:%S')
+                })
+                progress["random_attempts"] += 1
+                save_progress(progress)
+
+                logger.info(f"Проверен блок: {hex(random_key)}...{hex(chunk_end)}")
 
         if __name__ == "__main__":
             main()
         EOF
 
-        python btc_finder.py
+        python btc_hybrid_finder.py
 
     - name: Upload results
       uses: actions/upload-artifact@v4
-      if: always()
       with:
-        name: btc-finder-results
+        name: hybrid-finder-results
         path: |
-          btc_key_finder.log
-          found_key.txt
-          checked_ranges.json
+          hybrid_finder.log
+          CHECKPOINT_FILE
