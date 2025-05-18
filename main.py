@@ -18,8 +18,8 @@ class Colors:
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000
-MAIN_START = 0x400000000000000000
-MAIN_END = 0x7fffffffffffffffff
+MAIN_START = 0x6937096C8633D89DE2
+MAIN_END = 0x6937096C8634D89DE2
 
 def load_checked_ranges():
     if os.path.exists(CHECKPOINT_FILE):
@@ -87,12 +87,12 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
                 found_key = private_hex
                 break
             current += 1
-            if current % 1000 == 0:  # Обновляем только каждые 1000 ключей
-                pbar.update(1000)
+            if current % 100000 == 0:  # Обновляем только каждые 1000 ключей
+                pbar.update(100000)
         
         # Обновляем оставшиеся ключи
-        if current % 1000 != 0:
-            pbar.update(current % 1000)
+        if current % 100000 != 0:
+            pbar.update(current % 100000)
     
     if not found_key:
         checked_ranges.append({
