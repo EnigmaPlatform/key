@@ -1,4 +1,3 @@
-
 import hashlib
 import random
 import base58
@@ -74,11 +73,12 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
     end_key = min(start_key + CHUNK_SIZE - 1, MAIN_END)
     found_key = None
     
-    # Настройка прогресс-бара с обновлением каждые 1000 ключей
+    # Настройка прогресс-бара с полным отображением диапазона
     with tqdm(total=end_key-start_key+1, 
-             desc=f"Диапазон {hex(start_key)[2:10]}...", 
-             mininterval=2,  # Минимальный интервал обновления (секунды)
-             bar_format="{desc}: {percentage:.1f}%|{bar}| {n_fmt}/{total_fmt} [Осталось: {remaining}]") as pbar:
+             desc=f"Диапазон {hex(start_key)}-{hex(end_key)}", 
+             mininterval=2,
+             bar_format="{desc}: {percentage:.1f}%|{bar}| {n_fmt}/{total_fmt} [Осталось: {remaining}]",
+             dynamic_ncols=True) as pbar:
         
         current = start_key
         while current <= end_key:
@@ -87,12 +87,7 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
                 found_key = private_hex
                 break
             current += 1
-            if current % 100000 == 0:  # Обновляем только каждые 1000 ключей
-                pbar.update(100000)
-        
-        # Обновляем оставшиеся ключи
-        if current % 100000 != 0:
-            pbar.update(current % 100000)
+            pbar.update(1)
     
     if not found_key:
         checked_ranges.append({
@@ -141,7 +136,7 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
         print(f"\n{Colors.YELLOW}Поиск остановлен пользователем{Colors.END}")
     finally:
         print(f"\nИтоги:")
-        print(f"Всего проверено: {total_checked + CHUNK_SIZE:,} ключей")
+        print(f"Всего проверено: {total_checked + (0 if 'found_key' in locals() else CHUNK_SIZE):,} ключей")
         print(f"Сохранено диапазонов: {len(checked_ranges)}")
         if checked_ranges:
             last_range = checked_ranges[-1]
