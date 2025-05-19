@@ -1,16 +1,14 @@
 import hashlib
 import random
 import base58
-import ecdsa
 import time
 import json
 import os
 from tqdm import tqdm
-from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
-from bitcoin-utils import PrivateKey  # Новая оптимизированная библиотека
+import coincurve  # Быстрая библиотека для ECDSA
 
 class Colors:
     GREEN = '\033[92m'
@@ -18,15 +16,15 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Увеличенные параметры для CPU
+# Параметры для CPU
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 10_000_000  # Размер чанка для проверки
+CHUNK_SIZE = 10_000_000
 MAIN_START = 0x41D6A7E9C0B1D9A9BF
 MAIN_END = 0x45FFFFFFFFFFFFFFFFF
-BATCH_SIZE = 10_000_000  # Увеличен в 10 раз
-MAX_WORKERS = multiprocessing.cpu_count() * 2  # Используем гипертрединг
-SAVE_INTERVAL = 5  # Чаще сохраняем прогресс
+BATCH_SIZE = 1_000_000  # Оптимально для CPU
+MAX_WORKERS = multiprocessing.cpu_count() * 2  # Гипертрединг
+SAVE_INTERVAL = 5
 
 # Глобальные переменные
 stop_flag = False
@@ -67,17 +65,24 @@ def merge_ranges(ranges):
     
     return merged
 
+def private_to_address(private_key_hex):
+    """Оптимизированная генерация адреса с coincurve"""
+    try:
+        private_key = bytes.fromhex(private_key_hex)
+        public_key = coincurve.PublicKey.from_valid_secret(private_key).format(compressed=True)
+        
+        sha256 = hashlib.sha256(public_key).digest()
+        ripemd160 = hashlib.new('ripemd160', sha256).digest()
+        
+        extended = b'\x00' + ripemd160
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
+        return base58.b58encode(extended + checksum).decode('utf-8')
+    except:
+        return None
+
 def generate_address_batch(batch):
-    """Оптимизированная генерация адресов с bitcoinutils"""
-    results = []
-    for private_key_hex in batch:
-        try:
-            priv = PrivateKey.from_hex(private_key_hex)
-            address = priv.get_public_key().get_address().to_string()
-            results.append(address)
-        except:
-            results.append(None)
-    return results
+    """Обработка пакета ключей"""
+    return [private_to_address(pk) for pk in batch]
 
 def check_sequential_chunk(start_key, target_address, checked_ranges):
     global stop_flag, current_chunk
@@ -92,28 +97,22 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
              bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}{postfix}, {remaining}]",
              dynamic_ncols=True) as pbar:
         
-        # Разбиваем на большие пакеты для обработки
-        big_batch_size = BATCH_SIZE * 10  # 100M ключей за раз
-        for big_batch_start in range(start_key, end_key+1, big_batch_size):
+        # Разбиваем на пакеты
+        for batch_start in range(start_key, end_key+1, BATCH_SIZE):
             if stop_flag:
                 break
                 
-            big_batch_end = min(big_batch_start + big_batch_size - 1, end_key)
-            batches = []
-            
-            # Подготовка пакетов
-            for batch_start in range(big_batch_start, big_batch_end+1, BATCH_SIZE):
-                batch_end = min(batch_start + BATCH_SIZE - 1, big_batch_end)
-                batches.append([format(k, '064x') for k in range(batch_start, batch_end+1)])
+            batch_end = min(batch_start + BATCH_SIZE - 1, end_key)
+            batch = [format(k, '064x') for k in range(batch_start, batch_end+1)]
             
             # Параллельная обработка
             with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = [executor.submit(generate_address_batch, batch) for batch in batches]
+                futures = [executor.submit(generate_address_batch, batch)]
                 
                 for future in as_completed(futures):
                     results = future.result()
                     if target_address in results:
-                        found_key = batches[results.index(target_address)][results.index(target_address)]
+                        found_key = batch[results.index(target_address)]
                         stop_flag = True
                         break
                         
@@ -152,12 +151,8 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
     print(f"Процессов: {MAX_WORKERS}, Пакет: {BATCH_SIZE} ключей\n")
 
     try:
-        while not stop_flag:
-            # Детерминированное разбиение вместо случайного
-            next_start = checked_ranges[-1]['end'] + 1 if checked_ranges else MAIN_START
-            if next_start > MAIN_END:
-                break
-                
+        next_start = checked_ranges[-1]['end'] + 1 if checked_ranges else MAIN_START
+        while not stop_flag and next_start <= MAIN_END:
             if found_key := check_sequential_chunk(next_start, target_address, checked_ranges):
                 print(f"\n{Colors.GREEN}Ключ найден!{Colors.END}")
                 print(f"Приватный ключ: {found_key}")
@@ -165,6 +160,10 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
                     f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"Private: {found_key}\n")
                     f.write(f"Address: {target_address}\n\n")
+                break
+                
+            next_start = checked_ranges[-1]['end'] + 1
+            if next_start > MAIN_END:
                 break
                 
     except Exception as e:
