@@ -17,7 +17,7 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Конфигурация
+# Configuration
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 50_000_000
@@ -25,9 +25,9 @@ MIN_CHUNK_SIZE = 1
 MAIN_START = 0x349b84b6431a593ef1
 MAIN_END = 0x349b84b6431a6c4ef1
 BATCH_SIZE = 50_000_000
-MAX_WORKERS = min(12, (os.cpu_count() or 1) * 2)  # Уменьшено для Windows
+MAX_WORKERS = min(12, (os.cpu_count() or 1) * 2)
 SAVE_INTERVAL = 5
-STATUS_INTERVAL = 30  # Уменьшен интервал статуса
+STATUS_INTERVAL = 30
 
 def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -52,30 +52,53 @@ def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
     return False
 
 def get_random_chunk(ranges: List[Dict]) -> Optional[tuple]:
-    attempts = 0
     total_checked = sum(r['end']-r['start']+1 for r in ranges)
     remaining = (MAIN_END - MAIN_START + 1) - total_checked
     
-    while attempts < 100 and remaining > 0:
-        current_chunk_size = min(CHUNK_SIZE, remaining)
-        if current_chunk_size < MIN_CHUNK_SIZE:
-            current_chunk_size = remaining
-            
-        start = random.randint(MAIN_START, MAIN_END - current_chunk_size)
-        end = start + current_chunk_size - 1
-        
-        if not is_range_checked(start, end, ranges):
-            return start, end
-        attempts += 1
-    return None
+    if remaining <= 0:
+        return None
+    
+    # Get all unverified ranges first
+    unverified_ranges = []
+    last_end = MAIN_START - 1
+    
+    # Sort checked ranges by start
+    sorted_ranges = sorted(ranges, key=lambda x: x['start'])
+    
+    for r in sorted_ranges:
+        if r['start'] > last_end + 1:
+            unverified_ranges.append((last_end + 1, r['start'] - 1))
+        last_end = max(last_end, r['end'])
+    
+    if last_end < MAIN_END:
+        unverified_ranges.append((last_end + 1, MAIN_END))
+    
+    # Select a random unverified range
+    if not unverified_ranges:
+        return None
+    
+    selected_range = random.choice(unverified_ranges)
+    range_start, range_end = selected_range
+    range_size = range_end - range_start + 1
+    
+    # If the range is small, return the whole thing
+    if range_size <= CHUNK_SIZE * 2:  # Use *2 to prevent too small chunks
+        return range_start, range_end
+    
+    # Otherwise select a random chunk within this range
+    chunk_size = min(CHUNK_SIZE, range_size)
+    start = random.randint(range_start, range_end - chunk_size + 1)
+    end = start + chunk_size - 1
+    
+    return start, end
 
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
         priv = bytes.fromhex(private_key_hex)
         pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
-        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
+        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
         extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
@@ -96,7 +119,7 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
         
     start, end = chunk
     chunk_size = end - start + 1
-    print(f"\n{Colors.YELLOW}Текущий диапазон: {hex(start)} - {hex(end)} ({chunk_size:,} keys){Colors.END}")
+    print(f"\n{Colors.YELLOW}Current range: {hex(start)} - {hex(end)} ({chunk_size:,} keys){Colors.END}")
     
     found_key = None
     try:
@@ -115,7 +138,7 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
                     break
     
     except Exception as e:
-        print(f"\n{Colors.RED}Ошибка в пуле процессов: {e}{Colors.END}")
+        print(f"\n{Colors.RED}Error in process pool: {e}{Colors.END}")
         return None
     
     if not found_key:
@@ -154,7 +177,6 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
     print(f"Workers: {MAX_WORKERS}\n")
     
     try:
-        # Простой прогресс-бар без tqdm для Windows
         start_time = time.time()
         while True:
             current_time = time.time()
