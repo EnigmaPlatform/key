@@ -20,11 +20,11 @@ class Colors:
 # Configuration
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 50_000_000
+CHUNK_SIZE = 100_000_000
 MIN_CHUNK_SIZE = 1
-MAIN_START = 0x349b84b6431a593ef1
-MAIN_END = 0x349b84b6431a6c4ef1
-BATCH_SIZE = 50_000_000
+MAIN_START = 0x1732C9CD0474A0000
+MAIN_END = 0x1A12F1DA9D70A0000
+BATCH_SIZE = 100_000_000
 MAX_WORKERS = min(12, (os.cpu_count() or 1) * 2)
 SAVE_INTERVAL = 5
 STATUS_INTERVAL = 30
@@ -164,7 +164,7 @@ def show_status(checked: List[Dict]):
     print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"=================={Colors.END}")
 
-def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
+def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
     total_range = MAIN_END - MAIN_START + 1
