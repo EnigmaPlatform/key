@@ -85,18 +85,37 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
 @lru_cache(maxsize=1000000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
+        # Конвертируем приватный ключ в байты
         priv = bytes.fromhex(private_key_hex)
-        pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
-        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
-        extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
-        return base58.b58encode(extended + checksum).decode('utf-8')
-    except:
+        
+        # Генерируем публичный ключ (сжатый формат)
+        pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
+        
+        # SHA-256 хеш публичного ключа
+        sha256_hash = hashlib.sha256(pub_key).digest()
+        
+        # RIPEMD-160 хеш от SHA-256
+        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        
+        # Добавляем версионный байт (0x00 для Mainnet)
+        versioned_payload = b'\x00' + ripemd160_hash
+        
+        # Вычисляем контрольную сумму (первые 4 байта двойного SHA-256)
+        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest()[:4]
+        
+        # Собираем полный payload
+        full_payload = versioned_payload + checksum
+        
+        # Кодируем в Base58
+        return base58.b58encode(full_payload).decode('utf-8')
+    except Exception as e:
+        print(f"{Colors.RED}Error generating address: {e}{Colors.END}")
         return None
 
 def process_batch(batch: List[str], target: str) -> Optional[str]:
     for pk in batch:
-        if private_to_address(pk) == target:
+        address = private_to_address(pk)
+        if address == target:
             return pk
     return None
 
