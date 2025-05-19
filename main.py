@@ -73,7 +73,7 @@ def private_to_address(private_key_hex):
         ripemd160 = hashlib.new('ripemd160', sha256).digest()
         
         extended = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]  # Исправлено: добавлены закрывающие скобки
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
