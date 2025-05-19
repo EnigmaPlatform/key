@@ -8,7 +8,7 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
-import coincurve  # Быстрая библиотека для ECDSA
+import coincurve
 
 class Colors:
     GREEN = '\033[92m'
@@ -22,11 +22,10 @@ FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000
 MAIN_START = 0x41D6A7E9C0B1D9A9BF
 MAIN_END = 0x45FFFFFFFFFFFFFFFFF
-BATCH_SIZE = 1_000_000  # Оптимально для CPU
-MAX_WORKERS = multiprocessing.cpu_count() * 2  # Гипертрединг
+BATCH_SIZE = 1_000_000
+MAX_WORKERS = multiprocessing.cpu_count() * 2
 SAVE_INTERVAL = 5
 
-# Глобальные переменные
 stop_flag = False
 current_chunk = None
 
@@ -66,7 +65,6 @@ def merge_ranges(ranges):
     return merged
 
 def private_to_address(private_key_hex):
-    """Оптимизированная генерация адреса с coincurve"""
     try:
         private_key = bytes.fromhex(private_key_hex)
         public_key = coincurve.PublicKey.from_valid_secret(private_key).format(compressed=True)
@@ -75,13 +73,12 @@ def private_to_address(private_key_hex):
         ripemd160 = hashlib.new('ripemd160', sha256).digest()
         
         extended = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
 
 def generate_address_batch(batch):
-    """Обработка пакета ключей"""
     return [private_to_address(pk) for pk in batch]
 
 def check_sequential_chunk(start_key, target_address, checked_ranges):
@@ -97,7 +94,6 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
              bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}{postfix}, {remaining}]",
              dynamic_ncols=True) as pbar:
         
-        # Разбиваем на пакеты
         for batch_start in range(start_key, end_key+1, BATCH_SIZE):
             if stop_flag:
                 break
@@ -105,7 +101,6 @@ def check_sequential_chunk(start_key, target_address, checked_ranges):
             batch_end = min(batch_start + BATCH_SIZE - 1, end_key)
             batch = [format(k, '064x') for k in range(batch_start, batch_end+1)]
             
-            # Параллельная обработка
             with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = [executor.submit(generate_address_batch, batch)]
                 
