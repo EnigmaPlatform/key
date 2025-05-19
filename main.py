@@ -101,7 +101,7 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         versioned_payload = b'\x00' + ripemd160_hash
         
         # Вычисляем контрольную сумму (первые 4 байта двойного SHA-256)
-        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest())[:4]
         
         # Собираем полный payload
         full_payload = versioned_payload + checksum
