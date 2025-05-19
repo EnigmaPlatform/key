@@ -15,6 +15,7 @@ class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
     YELLOW = '\033[93m'
+    BLUE = '\033[94m'
     END = '\033[0m'
 
 # Конфигурация
@@ -25,7 +26,7 @@ CONFIG = {
     'MIN_CHUNK_SIZE': 1,
     'MAIN_START': 0x15F5A5D3E70000000,
     'MAIN_END': 0x15F5A5D3E7FFFFFFF,
-    'BATCH_SIZE': 1_000_000,  # Оптимальный размер для 12 workers
+    'BATCH_SIZE': 1_000_000,
     'MAX_WORKERS': 12,
     'SAVE_INTERVAL': 5,
     'STATUS_INTERVAL': 5,
@@ -71,15 +72,12 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
     if not unverified:
         return None
     
-    # Выбираем случайный непроверенный диапазон
     range_start, range_end = random.choice(unverified)
     range_size = range_end - range_start + 1
     
-    # Если диапазон маленький - берем целиком
     if range_size <= CONFIG['CHUNK_SIZE'] * 2:
         return range_start, range_end
     
-    # Адаптивный размер чанка
     adaptive_size = min(CONFIG['CHUNK_SIZE'], max(CONFIG['MIN_CHUNK_SIZE'], range_size // 10))
     start = random.randint(range_start, range_end - adaptive_size + 1)
     return start, start + adaptive_size - 1
@@ -133,7 +131,6 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
             for future in as_completed(futures):
                 if result := future.result():
                     found_key = result
-                    # Отменяем все остальные задачи
                     for f in futures:
                         f.cancel()
                     break
@@ -172,10 +169,23 @@ def show_status(checked: List[Dict]):
     print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"=================={Colors.END}")
 
+def show_final_stats(checked: List[Dict], start_time: float):
+    total_checked = sum(r['end']-r['start']+1 for r in checked)
+    elapsed = time.time() - start_time
+    keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
+    
+    print(f"\n{Colors.BLUE}=== FINAL RESULTS ===")
+    print(f"Total keys checked: {format_large_number(total_checked)}")
+    print(f"Total time: {elapsed:.2f} seconds")
+    print(f"Average speed: {format_large_number(int(keys_per_sec))} keys/sec")
+    print(f"Last checked range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+    print(f"===================={Colors.END}")
+
 def main():
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
     total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
+    start_time = time.time()
     
     print(f"{Colors.YELLOW}Target address: {CONFIG['TARGET_ADDRESS']}{Colors.END}")
     print(f"Search range: {hex(CONFIG['MAIN_START'])} - {hex(CONFIG['MAIN_END'])}")
@@ -185,7 +195,6 @@ def main():
     print(f"Workers: {CONFIG['MAX_WORKERS']}\n")
     
     try:
-        start_time = time.time()
         while True:
             current_time = time.time()
             if current_time - last_status_time > CONFIG['STATUS_INTERVAL']:
@@ -200,13 +209,22 @@ def main():
                 last_status_time = current_time
             
             if found_key := check_random_chunk(CONFIG['TARGET_ADDRESS'], checked_ranges):
-                print(f"\n{Colors.GREEN}Key found!{Colors.END}")
+                print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
                 print(f"Private key: {found_key}")
                 with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
                     f.write(f"{time.ctime()}\n")
                     f.write(f"Private: {found_key}\n")
                     f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
-                break
+                show_final_stats(checked_ranges, start_time)
+                return
+            
+            # Проверка завершения полного перебора
+            unverified = get_unverified_ranges(checked_ranges)
+            if not unverified:
+                print(f"\n{Colors.BLUE}COMPLETE: Entire range has been checked.{Colors.END}")
+                print(f"{Colors.YELLOW}The target key was not found in the specified range.{Colors.END}")
+                show_final_stats(checked_ranges, start_time)
+                return
                 
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.END}")
@@ -215,6 +233,7 @@ def main():
     finally:
         save_checked_ranges(checked_ranges)
         show_status(checked_ranges)
+        show_final_stats(checked_ranges, start_time)
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
