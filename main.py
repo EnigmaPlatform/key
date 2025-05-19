@@ -188,11 +188,12 @@ def show_status(checked: List[Dict]):
     print(f"Checked: {format_large_number(total_checked)} keys")
     print(f"Progress: {percent:.12f}%")
     print(f"Remaining: {format_large_number(max(0, total_range - total_checked))} keys")
-    print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+    if checked:
+        print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"=================={Colors.END}")
 
 def show_final_stats(checked: List[Dict], start_time: float):
-    total_checked = sum(r['end']-r['start']+1 for r in checked)
+    total_checked = sum(r['end']-r['start']+1 for r in checked) if checked else 0
     elapsed = time.time() - start_time
     keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
     
@@ -200,7 +201,8 @@ def show_final_stats(checked: List[Dict], start_time: float):
     print(f"Total keys checked: {format_large_number(total_checked)}")
     print(f"Total time: {elapsed:.2f} seconds")
     print(f"Average speed: {format_large_number(int(keys_per_sec))} keys/sec")
-    print(f"Last checked range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+    if checked:
+        print(f"Last checked range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"===================={Colors.END}")
 
 def main(target_address=None):
@@ -218,6 +220,7 @@ def main(target_address=None):
     print(f"Workers: {CONFIG['MAX_WORKERS']}\n")
     
     try:
+        found_key = None
         while True:
             current_time = time.time()
             if current_time - last_status_time > CONFIG['STATUS_INTERVAL']:
@@ -231,23 +234,28 @@ def main(target_address=None):
                 show_status(checked_ranges)
                 last_status_time = current_time
             
-            if found_key := check_random_chunk(target, checked_ranges):
-                print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
-                print(f"Private key: {found_key}")
-                with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
-                    f.write(f"{time.ctime()}\n")
-                    f.write(f"Private: {found_key}\n")
-                    f.write(f"Address: {target}\n\n")
-                show_final_stats(checked_ranges, start_time)
-                return
+            result = check_random_chunk(target, checked_ranges)
+            if result:
+                found_key = result
+                break
             
             # Проверка завершения полного перебора
             unverified = get_unverified_ranges(checked_ranges)
             if not unverified:
-                print(f"\n{Colors.BLUE}COMPLETE: Entire range has been checked.{Colors.END}")
-                print(f"{Colors.YELLOW}The target key was not found in the specified range.{Colors.END}")
-                show_final_stats(checked_ranges, start_time)
-                return
+                break
+        
+        if found_key:
+            print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
+            print(f"Private key: {found_key}")
+            with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
+                f.write(f"{time.ctime()}\n")
+                f.write(f"Private: {found_key}\n")
+                f.write(f"Address: {target}\n\n")
+        else:
+            print(f"\n{Colors.BLUE}COMPLETE: Entire range has been checked.{Colors.END}")
+            print(f"{Colors.YELLOW}The target key was not found in the specified range.{Colors.END}")
+        
+        show_final_stats(checked_ranges, start_time)
                 
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.END}")
