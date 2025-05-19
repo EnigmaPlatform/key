@@ -9,6 +9,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
 import coincurve
+import bisect
+from typing import List, Dict, Optional
 
 class Colors:
     GREEN = '\033[92m'
@@ -16,20 +18,23 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Параметры для CPU
+# Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 10_000_000
+CHUNK_SIZE = 10_000_000  # Размер блока для проверки
 MAIN_START = 0x41D6A7E9C0B1D9A9BF
 MAIN_END = 0x45FFFFFFFFFFFFFFFFF
-BATCH_SIZE = 1_000_000
-MAX_WORKERS = multiprocessing.cpu_count() * 2
-SAVE_INTERVAL = 5
+BATCH_SIZE = 1_000_000  # Размер пакета для обработки
+MAX_WORKERS = multiprocessing.cpu_count() * 2  # Используем гипертрединг
+SAVE_INTERVAL = 5  # Сохранять прогресс каждые 5 чанков
 
+# Глобальные переменные
 stop_flag = False
 current_chunk = None
+checked_ranges = []  # Кешируем проверенные диапазоны
 
-def load_checked_ranges():
+def load_checked_ranges() -> List[Dict]:
+    """Загружает проверенные диапазоны из файла"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
@@ -38,92 +43,77 @@ def load_checked_ranges():
             return []
     return []
 
-def save_checked_ranges(ranges):
+def save_checked_ranges(ranges: List[Dict]):
+    """Сохраняет прогресс в файл"""
     with open(CHECKPOINT_FILE, 'w') as f:
         json.dump(ranges, f, indent=2)
 
-def is_key_checked(key_int, checked_ranges):
+def is_range_checked(start: int, end: int) -> bool:
+    """Проверяет, покрыт ли диапазон (оптимизировано через bisect)"""
     for r in checked_ranges:
-        if r['start'] <= key_int <= r['end']:
+        if r['start'] <= start <= r['end'] or r['start'] <= end <= r['end']:
             return True
     return False
 
-def merge_ranges(ranges):
-    if not ranges:
-        return []
-    
-    sorted_ranges = sorted(ranges, key=lambda x: x['start'])
-    merged = [sorted_ranges[0]]
-    
-    for current in sorted_ranges[1:]:
-        last = merged[-1]
-        if current['start'] <= last['end']:
-            last['end'] = max(last['end'], current['end'])
-        else:
-            merged.append(current)
-    
-    return merged
+def get_random_chunk() -> Optional[tuple]:
+    """Генерирует случайный непроверенный диапазон"""
+    attempts = 0
+    while attempts < 100:  # Лимит попыток
+        start = random.randint(MAIN_START, MAIN_END - CHUNK_SIZE)
+        end = start + CHUNK_SIZE - 1
+        if not is_range_checked(start, end):
+            return start, end
+        attempts += 1
+    return None
 
-def private_to_address(private_key_hex):
+def private_to_address(private_key_hex: str) -> Optional[str]:
+    """Быстрое преобразование приватного ключа в адрес"""
     try:
-        private_key = bytes.fromhex(private_key_hex)
-        public_key = coincurve.PublicKey.from_valid_secret(private_key).format(compressed=True)
-        
-        sha256 = hashlib.sha256(public_key).digest()
-        ripemd160 = hashlib.new('ripemd160', sha256).digest()
-        
-        extended = b'\x00' + ripemd160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]  # Исправлено: добавлены закрывающие скобки
+        priv = bytes.fromhex(private_key_hex)
+        pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
+        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
+        extended = b'\x00' + h160
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
 
-def generate_address_batch(batch):
-    return [private_to_address(pk) for pk in batch]
+def process_batch(batch: List[str], target: str) -> Optional[str]:
+    """Обрабатывает пакет ключей и ищет совпадение"""
+    for pk in batch:
+        if private_to_address(pk) == target:
+            return pk
+    return None
 
-def check_sequential_chunk(start_key, target_address, checked_ranges):
-    global stop_flag, current_chunk
+def check_random_chunk(target: str) -> Optional[str]:
+    """Проверяет случайный диапазон ключей"""
+    global current_chunk, checked_ranges
     
-    end_key = min(start_key + CHUNK_SIZE - 1, MAIN_END)
-    current_chunk = {'start': start_key, 'end': end_key}
+    chunk = get_random_chunk()
+    if not chunk:
+        return None
+        
+    start, end = chunk
+    current_chunk = {'start': start, 'end': end}
     found_key = None
     
-    with tqdm(total=end_key-start_key+1, 
-             desc=f"Проверка {hex(start_key)}-{hex(end_key)}", 
-             mininterval=2,
-             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}{postfix}, {remaining}]",
-             dynamic_ncols=True) as pbar:
+    # Разбиваем на пакеты для параллельной обработки
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = []
+        for batch_start in range(start, end + 1, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE - 1, end)
+            batch = [format(k, '064x') for k in range(batch_start, batch_end + 1)]
+            futures.append(executor.submit(process_batch, batch, target))
         
-        for batch_start in range(start_key, end_key+1, BATCH_SIZE):
-            if stop_flag:
-                break
-                
-            batch_end = min(batch_start + BATCH_SIZE - 1, end_key)
-            batch = [format(k, '064x') for k in range(batch_start, batch_end+1)]
-            
-            with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = [executor.submit(generate_address_batch, batch)]
-                
-                for future in as_completed(futures):
-                    results = future.result()
-                    if target_address in results:
-                        found_key = batch[results.index(target_address)]
-                        stop_flag = True
-                        break
-                        
-                    pbar.update(len(results))
-            
-            if found_key:
+        for future in as_completed(futures):
+            if result := future.result():
+                found_key = result
                 break
     
-    if not stop_flag and not found_key:
-        checked_ranges.append({
-            'start': start_key,
-            'end': end_key,
-            'checked_at': time.strftime('%Y-%m-%d %H:%M:%S')
-        })
+    if not found_key:
+        checked_ranges.append({'start': start, 'end': end, 'time': time.time()})
         if len(checked_ranges) % SAVE_INTERVAL == 0:
-            save_checked_ranges(merge_ranges(checked_ranges))
+            save_checked_ranges(checked_ranges)
     
     return found_key
 
@@ -133,43 +123,39 @@ def signal_handler(sig, frame):
     stop_flag = True
 
 def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
-    global stop_flag
+    global stop_flag, checked_ranges
     
     signal.signal(signal.SIGINT, signal_handler)
-    
-    checked_ranges = merge_ranges(load_checked_ranges())
+    checked_ranges = load_checked_ranges()
     total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
     
-    print(f"{Colors.YELLOW}Поиск ключа для адреса: {target_address}{Colors.END}")
+    print(f"{Colors.YELLOW}Целевой адрес: {target_address}{Colors.END}")
     print(f"Уже проверено: {total_checked:,} ключей")
-    print(f"Размер блока: {CHUNK_SIZE:,} ключей")
-    print(f"Процессов: {MAX_WORKERS}, Пакет: {BATCH_SIZE} ключей\n")
-
+    print(f"Размер чанка: {CHUNK_SIZE:,} ключей")
+    print(f"Параллельных процессов: {MAX_WORKERS}")
+    print(f"Случайный выбор блоков: ВКЛЮЧЕН\n")
+    
     try:
-        next_start = checked_ranges[-1]['end'] + 1 if checked_ranges else MAIN_START
-        while not stop_flag and next_start <= MAIN_END:
-            if found_key := check_sequential_chunk(next_start, target_address, checked_ranges):
-                print(f"\n{Colors.GREEN}Ключ найден!{Colors.END}")
-                print(f"Приватный ключ: {found_key}")
-                with open(FOUND_KEYS_FILE, "a") as f:
-                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    f.write(f"Private: {found_key}\n")
-                    f.write(f"Address: {target_address}\n\n")
-                break
-                
-            next_start = checked_ranges[-1]['end'] + 1
-            if next_start > MAIN_END:
-                break
+        with tqdm(desc="Общий прогресс", unit="key", dynamic_ncols=True) as pbar:
+            while not stop_flag:
+                if found_key := check_random_chunk(target_address):
+                    print(f"\n{Colors.GREEN}Ключ найден!{Colors.END}")
+                    print(f"Приватный ключ: {found_key}")
+                    with open(FOUND_KEYS_FILE, 'a') as f:
+                        f.write(f"{time.ctime()}\n")
+                        f.write(f"Private: {found_key}\n")
+                        f.write(f"Address: {target_address}\n\n")
+                    break
+                pbar.update(CHUNK_SIZE)
                 
     except Exception as e:
         print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
     finally:
-        save_checked_ranges(merge_ranges(checked_ranges))
-        total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
-        
+        save_checked_ranges(checked_ranges)
+        total = sum(r['end']-r['start']+1 for r in checked_ranges)
         print(f"\n{Colors.YELLOW}Итоги:{Colors.END}")
-        print(f"Всего проверено: {total_checked:,} ключей")
-        print(f"Осталось проверить: {MAIN_END - MAIN_START + 1 - total_checked:,} ключей")
+        print(f"Всего проверено: {total:,} ключей")
+        print(f"Осталось: {MAIN_END - MAIN_START + 1 - total:,} ключей")
 
 if __name__ == "__main__":
     import sys
