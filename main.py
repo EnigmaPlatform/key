@@ -95,13 +95,16 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         sha256_hash = hashlib.sha256(pub_key).digest()
         
         # RIPEMD-160 хеш от SHA-256
-        ripemd160 = hashlib.new('ripemd160', sha256_hash).digest()
+        ripemd160 = hashlib.new('ripemd160')
+        ripemd160.update(sha256_hash)
+        ripemd160_hash = ripemd160.digest()
         
         # Добавляем версионный байт (0x00 для Mainnet)
-        versioned_payload = b'\x00' + ripemd160
+        versioned_payload = b'\x00' + ripemd160_hash
         
         # Вычисляем контрольную сумму (первые 4 байта двойного SHA-256)
-        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest())[:4]
+        first_sha = hashlib.sha256(versioned_payload).digest()
+        checksum = hashlib.sha256(first_sha).digest()[:4]
         
         # Собираем полный payload
         full_payload = versioned_payload + checksum
@@ -200,13 +203,14 @@ def show_final_stats(checked: List[Dict], start_time: float):
     print(f"Last checked range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"===================={Colors.END}")
 
-def main():
+def main(target_address=None):
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
     total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
     start_time = time.time()
     
-    print(f"{Colors.YELLOW}Target address: {CONFIG['TARGET_ADDRESS']}{Colors.END}")
+    target = target_address if target_address else CONFIG['TARGET_ADDRESS']
+    print(f"{Colors.YELLOW}Target address: {target}{Colors.END}")
     print(f"Search range: {hex(CONFIG['MAIN_START'])} - {hex(CONFIG['MAIN_END'])}")
     print(f"Total keys: {format_large_number(total_range)}")
     print(f"Chunk size: {format_large_number(CONFIG['CHUNK_SIZE'])} (auto-adjusted)")
@@ -227,13 +231,13 @@ def main():
                 show_status(checked_ranges)
                 last_status_time = current_time
             
-            if found_key := check_random_chunk(CONFIG['TARGET_ADDRESS'], checked_ranges):
+            if found_key := check_random_chunk(target, checked_ranges):
                 print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
                 print(f"Private key: {found_key}")
                 with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
                     f.write(f"{time.ctime()}\n")
                     f.write(f"Private: {found_key}\n")
-                    f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
+                    f.write(f"Address: {target}\n\n")
                 show_final_stats(checked_ranges, start_time)
                 return
             
@@ -255,5 +259,7 @@ def main():
         show_final_stats(checked_ranges, start_time)
 
 if __name__ == "__main__":
+    import sys
     multiprocessing.freeze_support()
-    main()
+    target_addr = sys.argv[1] if len(sys.argv) > 1 else None
+    main(target_addr)
