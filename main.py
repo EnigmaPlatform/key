@@ -20,8 +20,8 @@ class Colors:
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000
-MAIN_START = 0x41D6A7E9C0B1D9A9BF
-MAIN_END = 0x45FFFFFFFFFFFFFFFFF
+MAIN_START = 0x349b84b6431a614ef1
+MAIN_END = 0x349b84b6431a6c4ef1
 BATCH_SIZE = 1_000_000
 MAX_WORKERS = multiprocessing.cpu_count() * 2
 SAVE_INTERVAL = 5
@@ -132,7 +132,7 @@ def signal_handler(sig, frame):
     print(f"\n{Colors.YELLOW}Получен сигнал прерывания...{Colors.END}")
     stop_flag = True
 
-def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
+def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
     global stop_flag
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -173,4 +173,4 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
 
 if __name__ == "__main__":
     import sys
-    main(sys.argv[1] if len(sys.argv) > 1 else "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU")
+    main(sys.argv[1] if len(sys.argv) > 1 else "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR")
