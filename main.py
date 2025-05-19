@@ -21,20 +21,19 @@ class Colors:
 # Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 10_000_000  # Размер блока для проверки
+CHUNK_SIZE = 10_000_000
 MAIN_START = 0x41D6A7E9C0B1D9A9BF
 MAIN_END = 0x45FFFFFFFFFFFFFFFFF
-BATCH_SIZE = 1_000_000  # Размер пакета для обработки
-MAX_WORKERS = multiprocessing.cpu_count() * 2  # Используем гипертрединг
-SAVE_INTERVAL = 5  # Сохранять прогресс каждые 5 чанков
+BATCH_SIZE = 1_000_000
+MAX_WORKERS = multiprocessing.cpu_count() * 2
+SAVE_INTERVAL = 5
 
 # Глобальные переменные
 stop_flag = False
 current_chunk = None
-checked_ranges = []  # Кешируем проверенные диапазоны
+checked_ranges = []
 
 def load_checked_ranges() -> List[Dict]:
-    """Загружает проверенные диапазоны из файла"""
     if os.path.exists(CHECKPOINT_FILE):
         try:
             with open(CHECKPOINT_FILE, 'r') as f:
@@ -44,21 +43,18 @@ def load_checked_ranges() -> List[Dict]:
     return []
 
 def save_checked_ranges(ranges: List[Dict]):
-    """Сохраняет прогресс в файл"""
     with open(CHECKPOINT_FILE, 'w') as f:
         json.dump(ranges, f, indent=2)
 
 def is_range_checked(start: int, end: int) -> bool:
-    """Проверяет, покрыт ли диапазон (оптимизировано через bisect)"""
     for r in checked_ranges:
         if r['start'] <= start <= r['end'] or r['start'] <= end <= r['end']:
             return True
     return False
 
 def get_random_chunk() -> Optional[tuple]:
-    """Генерирует случайный непроверенный диапазон"""
     attempts = 0
-    while attempts < 100:  # Лимит попыток
+    while attempts < 100:
         start = random.randint(MAIN_START, MAIN_END - CHUNK_SIZE)
         end = start + CHUNK_SIZE - 1
         if not is_range_checked(start, end):
@@ -67,26 +63,23 @@ def get_random_chunk() -> Optional[tuple]:
     return None
 
 def private_to_address(private_key_hex: str) -> Optional[str]:
-    """Быстрое преобразование приватного ключа в адрес"""
     try:
         priv = bytes.fromhex(private_key_hex)
         pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
         h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
         extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]  # Закрыты все скобки
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
 
 def process_batch(batch: List[str], target: str) -> Optional[str]:
-    """Обрабатывает пакет ключей и ищет совпадение"""
     for pk in batch:
         if private_to_address(pk) == target:
             return pk
     return None
 
 def check_random_chunk(target: str) -> Optional[str]:
-    """Проверяет случайный диапазон ключей"""
     global current_chunk, checked_ranges
     
     chunk = get_random_chunk()
@@ -97,7 +90,6 @@ def check_random_chunk(target: str) -> Optional[str]:
     current_chunk = {'start': start, 'end': end}
     found_key = None
     
-    # Разбиваем на пакеты для параллельной обработки
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = []
         for batch_start in range(start, end + 1, BATCH_SIZE):
