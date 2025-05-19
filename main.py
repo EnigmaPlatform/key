@@ -26,12 +26,7 @@ MAIN_END = 0x349b84b6431a6c4ef1
 BATCH_SIZE = 1_000_000
 MAX_WORKERS = min(32, (os.cpu_count() or 1) * 2)
 SAVE_INTERVAL = 5
-
-# Глобальные переменные
-manager = multiprocessing.Manager()
-stop_flag = manager.Value('b', False)
-current_chunk = manager.dict()
-checked_ranges = manager.list()
+STATUS_INTERVAL = 60  # Показывать статус каждые 60 секунд
 
 def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -47,7 +42,7 @@ def load_checked_ranges() -> List[Dict]:
 
 def save_checked_ranges(ranges: List[Dict]):
     with open(CHECKPOINT_FILE, 'w') as f:
-        json.dump(list(ranges), f, indent=2)
+        json.dump(ranges, f, indent=2)
 
 def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
     for r in ranges:
@@ -71,15 +66,13 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
         h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
         extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]  # Исправленная строка
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
 
 def process_batch(batch: List[str], target: str) -> Optional[str]:
     for pk in batch:
-        if stop_flag.value:
-            return None
         if private_to_address(pk) == target:
             return pk
     return None
@@ -90,62 +83,62 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
         return None
         
     start, end = chunk
-    current_chunk.update({'start': start, 'end': end})
-    print(f"\n{Colors.YELLOW}Проверяем диапазон: {hex(start)} - {hex(end)}{Colors.END}")
+    print(f"\n{Colors.YELLOW}Текущий диапазон: {hex(start)} - {hex(end)}{Colors.END}")
     
     found_key = None
     try:
         with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=init_worker) as executor:
             futures = []
-            for batch_start in range(start, end + 1, BATCH_SIZE):
-                if stop_flag.value:
-                    break
-                    
+            for batch_start in range(start, end + 1, BATCH_SIZE):                    
                 batch_end = min(batch_start + BATCH_SIZE - 1, end)
                 batch = [format(k, '064x') for k in range(batch_start, batch_end + 1)]
                 futures.append(executor.submit(process_batch, batch, target))
             
-            for future in as_completed(futures):
-                if stop_flag.value:
-                    executor.shutdown(wait=False)
-                    break
-                    
+            for future in as_completed(futures):                    
                 if result := future.result():
                     found_key = result
+                    executor.shutdown(wait=False)
                     break
+    
     except Exception as e:
-        print(f"\n{Colors.RED}Ошибка в пуле процессов: {e}{Colors.END}")
+        print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
         return None
     
-    if not found_key and not stop_flag.value:
+    if not found_key:
         ranges.append({'start': start, 'end': end, 'time': time.time()})
         if len(ranges) % SAVE_INTERVAL == 0:
             save_checked_ranges(ranges)
     
     return found_key
 
-def signal_handler(sig, frame):
-    global stop_flag
-    print(f"\n{Colors.YELLOW}Завершение работы...{Colors.END}")
-    stop_flag.value = True
+def show_status(checked: List[Dict]):
+    total_checked = sum(r['end']-r['start']+1 for r in checked)
+    total_range = MAIN_END - MAIN_START + 1
+    percent = (total_checked / total_range) * 100
+    
+    print(f"\n{Colors.YELLOW}=== Статус проверки ===")
+    print(f"Проверено: {total_checked:,} ключей")
+    print(f"Прогресс: {percent:.6f}%")
+    print(f"Осталось: {total_range - total_checked:,} ключей")
+    print(f"Последний диапазон: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+    print(f"========================={Colors.END}\n")
 
 def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
-    global stop_flag, current_chunk, checked_ranges
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    checked_ranges.extend(load_checked_ranges())
-    total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
+    checked_ranges = load_checked_ranges()
+    last_status_time = time.time()
     
     print(f"{Colors.YELLOW}Целевой адрес: {target_address}{Colors.END}")
-    print(f"Уже проверено: {total_checked:,} ключей")
-    print(f"Размер чанка: {CHUNK_SIZE:,} ключей")
-    print(f"Параллельных процессов: {MAX_WORKERS}")
     print(f"Диапазон поиска: {hex(MAIN_START)} - {hex(MAIN_END)}")
-    print(f"Случайный выбор блоков: ВКЛЮЧЕН\n")
+    print(f"Размер чанка: {CHUNK_SIZE:,} ключей")
+    print(f"Параллельных процессов: {MAX_WORKERS}\n")
     
     try:
         with tqdm(desc="Общий прогресс", unit="key", dynamic_ncols=True) as pbar:
-            while not stop_flag.value:
+            while True:
+                if time.time() - last_status_time > STATUS_INTERVAL:
+                    show_status(checked_ranges)
+                    last_status_time = time.time()
+                
                 if found_key := check_random_chunk(target_address, checked_ranges):
                     print(f"\n{Colors.GREEN}Ключ найден!{Colors.END}")
                     print(f"Приватный ключ: {found_key}")
@@ -154,18 +147,17 @@ def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
                         f.write(f"Private: {found_key}\n")
                         f.write(f"Address: {target_address}\n\n")
                     break
+                
                 pbar.update(CHUNK_SIZE)
                 
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Прерывание пользователем...{Colors.END}")
     except Exception as e:
-        print(f"\n{Colors.RED}Критическая ошибка: {e}{Colors.END}")
+        print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
     finally:
         save_checked_ranges(checked_ranges)
-        total = sum(r['end']-r['start']+1 for r in checked_ranges)
-        print(f"\n{Colors.YELLOW}Итоги:{Colors.END}")
-        print(f"Всего проверено: {total:,} ключей")
-        print(f"Осталось: {MAIN_END - MAIN_START + 1 - total:,} ключей")
+        show_status(checked_ranges)
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    import sys
-    main(sys.argv[1] if len(sys.argv) > 1 else "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR")
+    main()
