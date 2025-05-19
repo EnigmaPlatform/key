@@ -17,17 +17,17 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Конфигурация (увеличена CHUNK_SIZE до 100 млн)
+# Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 100_000_000  # Увеличенный размер чанка
-MIN_CHUNK_SIZE = 10_000_000  # Минимальный допустимый размер чанка
+CHUNK_SIZE = 100_000_000
+MIN_CHUNK_SIZE = 10_000_000
 MAIN_START = 0x349b84b6430a6c4ef1
 MAIN_END = 0x349b84b6431a6c4ef1
-BATCH_SIZE = 10_000_000  # Увеличен для соответствия
-MAX_WORKERS = min(32, (os.cpu_count() or 1) * 2)
+BATCH_SIZE = 10_000_000
+MAX_WORKERS = min(12, (os.cpu_count() or 1) * 2)  # Уменьшено для Windows
 SAVE_INTERVAL = 5
-STATUS_INTERVAL = 60
+STATUS_INTERVAL = 30  # Уменьшен интервал статуса
 
 def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -53,17 +53,13 @@ def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
 
 def get_random_chunk(ranges: List[Dict]) -> Optional[tuple]:
     attempts = 0
-    while attempts < 100:
-        # Вычисляем доступный диапазон
-        available_range = MAIN_END - MAIN_START - sum(
-            r['end'] - r['start'] + 1 for r in ranges
-        )
-        
-        # Если осталось меньше CHUNK_SIZE, берем меньший чанк (но не меньше MIN_CHUNK_SIZE)
-        current_chunk_size = min(CHUNK_SIZE, max(available_range, MIN_CHUNK_SIZE))
-        
-        if available_range <= 0:
-            return None
+    total_checked = sum(r['end']-r['start']+1 for r in ranges)
+    remaining = (MAIN_END - MAIN_START + 1) - total_checked
+    
+    while attempts < 100 and remaining > 0:
+        current_chunk_size = min(CHUNK_SIZE, remaining)
+        if current_chunk_size < MIN_CHUNK_SIZE:
+            current_chunk_size = remaining
             
         start = random.randint(MAIN_START, MAIN_END - current_chunk_size)
         end = start + current_chunk_size - 1
@@ -86,8 +82,11 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
 
 def process_batch(batch: List[str], target: str) -> Optional[str]:
     for pk in batch:
-        if private_to_address(pk) == target:
-            return pk
+        try:
+            if private_to_address(pk) == target:
+                return pk
+        except:
+            continue
     return None
 
 def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
@@ -97,25 +96,26 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
         
     start, end = chunk
     chunk_size = end - start + 1
-    print(f"\n{Colors.YELLOW}Текущий диапазон: {hex(start)} - {hex(end)} ({chunk_size:,} ключей){Colors.END}")
+    print(f"\n{Colors.YELLOW}Текущий диапазон: {hex(start)} - {hex(end)} ({chunk_size:,} keys){Colors.END}")
     
     found_key = None
     try:
         with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=init_worker) as executor:
             futures = []
-            for batch_start in range(start, end + 1, BATCH_SIZE):                    
+            for batch_start in range(start, end + 1, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE - 1, end)
                 batch = [format(k, '064x') for k in range(batch_start, batch_end + 1)]
                 futures.append(executor.submit(process_batch, batch, target))
             
-            for future in as_completed(futures):                    
+            for future in as_completed(futures):
                 if result := future.result():
                     found_key = result
-                    executor.shutdown(wait=False)
+                    for f in futures:
+                        f.cancel()
                     break
     
     except Exception as e:
-        print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
+        print(f"\n{Colors.RED}Ошибка в пуле процессов: {e}{Colors.END}")
         return None
     
     if not found_key:
@@ -127,61 +127,61 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
 
 def show_status(checked: List[Dict]):
     if not checked:
-        print(f"{Colors.YELLOW}Еще не проверено ни одного диапазона{Colors.END}")
+        print(f"{Colors.YELLOW}No ranges checked yet{Colors.END}")
         return
     
     total_checked = sum(r['end']-r['start']+1 for r in checked)
     total_range = MAIN_END - MAIN_START + 1
     percent = (total_checked / total_range) * 100 if total_range > 0 else 0
     
-    print(f"\n{Colors.YELLOW}=== Статус проверки ===")
-    print(f"Проверено: {total_checked:,} ключей")
-    print(f"Прогресс: {percent:.6f}%")
-    print(f"Осталось: {max(0, total_range - total_checked):,} ключей")
-    if checked:
-        last_chunk = checked[-1]
-        print(f"Последний диапазон: {hex(last_chunk['start'])} - {hex(last_chunk['end'])} ({last_chunk['end']-last_chunk['start']+1:,} keys)")
-    print(f"========================={Colors.END}\n")
+    print(f"\n{Colors.YELLOW}=== Status ===")
+    print(f"Checked: {total_checked:,} keys")
+    print(f"Progress: {percent:.6f}%")
+    print(f"Remaining: {max(0, total_range - total_checked):,} keys")
+    print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+    print(f"=================={Colors.END}")
 
 def main(target_address="19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"):
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
     total_range = MAIN_END - MAIN_START + 1
     
-    print(f"{Colors.YELLOW}Целевой адрес: {target_address}{Colors.END}")
-    print(f"Диапазон поиска: {hex(MAIN_START)} - {hex(MAIN_END)}")
-    print(f"Общий размер: {total_range:,} ключей")
-    print(f"Размер чанка: {CHUNK_SIZE:,} ключей (авторегулировка)")
-    print(f"Мин. размер чанка: {MIN_CHUNK_SIZE:,} ключей")
-    print(f"Параллельных процессов: {MAX_WORKERS}\n")
+    print(f"{Colors.YELLOW}Target address: {target_address}{Colors.END}")
+    print(f"Search range: {hex(MAIN_START)} - {hex(MAIN_END)}")
+    print(f"Total keys: {total_range:,}")
+    print(f"Chunk size: {CHUNK_SIZE:,} (auto-adjusted)")
+    print(f"Min chunk size: {MIN_CHUNK_SIZE:,}")
+    print(f"Workers: {MAX_WORKERS}\n")
     
     try:
-        with tqdm(total=total_range, desc="Общий прогресс", unit="key", 
-                 dynamic_ncols=True, mininterval=1) as pbar:
-            while True:
-                current_time = time.time()
-                if current_time - last_status_time > STATUS_INTERVAL:
-                    show_status(checked_ranges)
-                    last_status_time = current_time
+        # Простой прогресс-бар без tqdm для Windows
+        start_time = time.time()
+        while True:
+            current_time = time.time()
+            if current_time - last_status_time > STATUS_INTERVAL:
+                total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
+                elapsed = current_time - start_time
+                keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
                 
-                if found_key := check_random_chunk(target_address, checked_ranges):
-                    print(f"\n{Colors.GREEN}Ключ найден!{Colors.END}")
-                    print(f"Приватный ключ: {found_key}")
-                    with open(FOUND_KEYS_FILE, 'a') as f:
-                        f.write(f"{time.ctime()}\n")
-                        f.write(f"Private: {found_key}\n")
-                        f.write(f"Address: {target_address}\n\n")
-                    break
-                
-                # Обновляем прогресс-бар
-                if checked_ranges:
-                    pbar.n = sum(r['end']-r['start']+1 for r in checked_ranges)
-                    pbar.refresh()
+                print(f"\n{Colors.YELLOW}[Progress] Checked: {total_checked:,} keys | "
+                      f"Speed: {keys_per_sec:,.0f} keys/sec | "
+                      f"Elapsed: {elapsed:.1f}s{Colors.END}")
+                show_status(checked_ranges)
+                last_status_time = current_time
+            
+            if found_key := check_random_chunk(target_address, checked_ranges):
+                print(f"\n{Colors.GREEN}Key found!{Colors.END}")
+                print(f"Private key: {found_key}")
+                with open(FOUND_KEYS_FILE, 'a') as f:
+                    f.write(f"{time.ctime()}\n")
+                    f.write(f"Private: {found_key}\n")
+                    f.write(f"Address: {target_address}\n\n")
+                break
                 
     except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Прерывание пользователем...{Colors.END}")
+        print(f"\n{Colors.YELLOW}Interrupted by user{Colors.END}")
     except Exception as e:
-        print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
+        print(f"\n{Colors.RED}Error: {e}{Colors.END}")
     finally:
         save_checked_ranges(checked_ranges)
         show_status(checked_ranges)
