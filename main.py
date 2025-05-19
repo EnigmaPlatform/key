@@ -95,10 +95,10 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         sha256_hash = hashlib.sha256(pub_key).digest()
         
         # RIPEMD-160 хеш от SHA-256
-        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        ripemd160 = hashlib.new('ripemd160', sha256_hash).digest()
         
         # Добавляем версионный байт (0x00 для Mainnet)
-        versioned_payload = b'\x00' + ripemd160_hash
+        versioned_payload = b'\x00' + ripemd160
         
         # Вычисляем контрольную сумму (первые 4 байта двойного SHA-256)
         checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest())[:4]
