@@ -21,9 +21,9 @@ class Colors:
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 10_000_000
-MAIN_START = 0x65A4321FEDCBA98700
-MAIN_END = 0x6D7A3B4F5C6D2E1F00
-BATCH_SIZE = 100000  # Увеличен размер пакета
+MAIN_START = 0x41D6A7E9C0B1D9A9BF
+MAIN_END = 0x45FFFFFFFFFFFFFFFFF
+BATCH_SIZE = 1000000  # Увеличен размер пакета
 MAX_WORKERS = multiprocessing.cpu_count()  # Используем все ядра
 SAVE_INTERVAL = 10
 
