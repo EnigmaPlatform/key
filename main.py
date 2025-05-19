@@ -20,12 +20,12 @@ class Colors:
 # Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 20_000_000
+CHUNK_SIZE = 10_000_000
 MIN_CHUNK_SIZE = 1
 MAIN_START = 0x1938ec6e3f2a70000
 MAIN_END = 0x1aedf7475bb6d0000
 BATCH_SIZE = 5_000_000  # Уменьшенный размер батча для лучшего распределения
-MAX_WORKERS = 8
+MAX_WORKERS = 12
 SAVE_INTERVAL = 5
 STATUS_INTERVAL = 30
 
