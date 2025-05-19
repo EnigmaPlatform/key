@@ -27,7 +27,7 @@ MAIN_END = 0x1aedf7475bb6d0000
 BATCH_SIZE = 5_000_000  # Уменьшенный размер батча для лучшего распределения
 MAX_WORKERS = 12
 SAVE_INTERVAL = 5
-STATUS_INTERVAL = 30
+STATUS_INTERVAL = 5
 
 def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
