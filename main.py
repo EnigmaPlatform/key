@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
 import coincurve
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from functools import lru_cache
 
 class Colors:
@@ -18,72 +18,73 @@ class Colors:
     END = '\033[0m'
 
 # Конфигурация
-CHECKPOINT_FILE = "checked_ranges.json"
-FOUND_KEYS_FILE = "found_keys.txt"
-CHUNK_SIZE = 10_000_000
-MIN_CHUNK_SIZE = 1
-MAIN_START = 0x15F5A5D3E70000000
-MAIN_END = 0x15F5A5D3E7FFFFFFF
-BATCH_SIZE = 5_000_000  # Уменьшенный размер батча для лучшего распределения
-MAX_WORKERS = 12
-SAVE_INTERVAL = 5
-STATUS_INTERVAL = 5
+CONFIG = {
+    'CHECKPOINT_FILE': "checked_ranges.json",
+    'FOUND_KEYS_FILE': "found_keys.txt",
+    'CHUNK_SIZE': 10_000_000,
+    'MIN_CHUNK_SIZE': 1,
+    'MAIN_START': 0x15F5A5D3E70000000,
+    'MAIN_END': 0x15F5A5D3E7FFFFFFF,
+    'BATCH_SIZE': 1_000_000,  # Оптимальный размер для 12 workers
+    'MAX_WORKERS': 12,
+    'SAVE_INTERVAL': 5,
+    'STATUS_INTERVAL': 5,
+    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
+}
 
 def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 def load_checked_ranges() -> List[Dict]:
-    if os.path.exists(CHECKPOINT_FILE):
+    if os.path.exists(CONFIG['CHECKPOINT_FILE']):
         try:
-            with open(CHECKPOINT_FILE, 'r') as f:
+            with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
                 return json.load(f)
         except:
             return []
     return []
 
 def save_checked_ranges(ranges: List[Dict]):
-    with open(CHECKPOINT_FILE, 'w') as f:
+    with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
         json.dump(ranges, f, indent=2)
 
 def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
-    for r in ranges:
-        if r['start'] <= start <= r['end'] or r['start'] <= end <= r['end']:
-            return True
-    return False
+    return any(r['start'] <= start <= r['end'] or r['start'] <= end <= r['end'] for r in ranges)
 
-def get_random_chunk(ranges: List[Dict]) -> Optional[tuple]:
-    total_checked = sum(r['end']-r['start']+1 for r in ranges)
-    remaining = (MAIN_END - MAIN_START + 1) - total_checked
+def get_unverified_ranges(ranges: List[Dict]) -> List[Tuple[int, int]]:
+    sorted_ranges = sorted(ranges, key=lambda x: x['start'])
+    unverified = []
+    last_end = CONFIG['MAIN_START'] - 1
     
-    if remaining <= 0:
-        return None
-    
-    # Если осталось меньше 2% от общего диапазона, проверяем все оставшееся
-    if remaining < (MAIN_END - MAIN_START + 1) * 0.02:
-        return MAIN_START + total_checked, MAIN_END
-    
-    # Адаптивный размер чанка
-    adaptive_chunk_size = min(CHUNK_SIZE, max(MIN_CHUNK_SIZE, remaining // 100))
-    
-    # Находим первый непроверенный диапазон
-    last_end = MAIN_START - 1
-    for r in sorted(ranges, key=lambda x: x['start']):
+    for r in sorted_ranges:
         if r['start'] > last_end + 1:
-            unverified_start = last_end + 1
-            unverified_end = r['start'] - 1
-            chunk_size = min(adaptive_chunk_size, unverified_end - unverified_start + 1)
-            start = random.randint(unverified_start, unverified_end - chunk_size + 1)
-            return start, start + chunk_size - 1
+            unverified.append((last_end + 1, r['start'] - 1))
         last_end = max(last_end, r['end'])
     
-    if last_end < MAIN_END:
-        unverified_start = last_end + 1
-        chunk_size = min(adaptive_chunk_size, MAIN_END - unverified_start + 1)
-        return unverified_start, unverified_start + chunk_size - 1
+    if last_end < CONFIG['MAIN_END']:
+        unverified.append((last_end + 1, CONFIG['MAIN_END']))
     
-    return None
+    return unverified
 
-@lru_cache(maxsize=100000)
+def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
+    unverified = get_unverified_ranges(ranges)
+    if not unverified:
+        return None
+    
+    # Выбираем случайный непроверенный диапазон
+    range_start, range_end = random.choice(unverified)
+    range_size = range_end - range_start + 1
+    
+    # Если диапазон маленький - берем целиком
+    if range_size <= CONFIG['CHUNK_SIZE'] * 2:
+        return range_start, range_end
+    
+    # Адаптивный размер чанка
+    adaptive_size = min(CONFIG['CHUNK_SIZE'], max(CONFIG['MIN_CHUNK_SIZE'], range_size // 10))
+    start = random.randint(range_start, range_end - adaptive_size + 1)
+    return start, start + adaptive_size - 1
+
+@lru_cache(maxsize=1000000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
         priv = bytes.fromhex(private_key_hex)
@@ -95,13 +96,24 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
     except:
         return None
 
-def process_batch(batch_start: int, batch_end: int, target: str) -> Optional[str]:
-    for k in range(batch_start, batch_end + 1):
-        private_key_hex = f"{k:064x}"
-        address = private_to_address(private_key_hex)
-        if address == target:
-            return private_key_hex
+def process_batch(batch: List[str], target: str) -> Optional[str]:
+    for pk in batch:
+        if private_to_address(pk) == target:
+            return pk
     return None
+
+def generate_batches(start: int, end: int) -> List[List[str]]:
+    batch_size = CONFIG['BATCH_SIZE']
+    batches = []
+    current = start
+    
+    while current <= end:
+        batch_end = min(current + batch_size - 1, end)
+        batch = [f"{k:064x}" for k in range(current, batch_end + 1)]
+        batches.append(batch)
+        current = batch_end + 1
+    
+    return batches
 
 def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     chunk = get_random_chunk(ranges)
@@ -114,16 +126,14 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     
     found_key = None
     try:
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=init_worker) as executor:
-            futures = []
-            batch_size = max(BATCH_SIZE, (end - start + 1) // (MAX_WORKERS * 4))
-            for batch_start in range(start, end + 1, batch_size):
-                batch_end = min(batch_start + batch_size - 1, end)
-                futures.append(executor.submit(process_batch, batch_start, batch_end, target))
+        batches = generate_batches(start, end)
+        with ProcessPoolExecutor(max_workers=CONFIG['MAX_WORKERS'], initializer=init_worker) as executor:
+            futures = {executor.submit(process_batch, batch, target): batch for batch in batches}
             
             for future in as_completed(futures):
                 if result := future.result():
                     found_key = result
+                    # Отменяем все остальные задачи
                     for f in futures:
                         f.cancel()
                     break
@@ -134,20 +144,17 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     
     if not found_key:
         ranges.append({'start': start, 'end': end, 'time': time.time()})
-        if len(ranges) % SAVE_INTERVAL == 0:
+        if len(ranges) % CONFIG['SAVE_INTERVAL'] == 0:
             save_checked_ranges(ranges)
     
     return found_key
 
 def format_large_number(n: int) -> str:
-    if n < 1e6:
-        return f"{n:,}"
-    elif n < 1e9:
-        return f"{n/1e6:,.2f}M"
-    elif n < 1e12:
-        return f"{n/1e9:,.2f}B"
-    else:
-        return f"{n/1e12:,.2f}T"
+    for unit in ['', 'K', 'M', 'B', 'T']:
+        if abs(n) < 1000:
+            return f"{n:,.0f}{unit}"
+        n /= 1000
+    return f"{n:,.0f}P"
 
 def show_status(checked: List[Dict]):
     if not checked:
@@ -155,7 +162,7 @@ def show_status(checked: List[Dict]):
         return
     
     total_checked = sum(r['end']-r['start']+1 for r in checked)
-    total_range = MAIN_END - MAIN_START + 1
+    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
     percent = (total_checked / total_range) * 100 if total_range > 0 else 0
     
     print(f"\n{Colors.YELLOW}=== Status ===")
@@ -165,23 +172,23 @@ def show_status(checked: List[Dict]):
     print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"=================={Colors.END}")
 
-def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
+def main():
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
-    total_range = MAIN_END - MAIN_START + 1
+    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
     
-    print(f"{Colors.YELLOW}Target address: {target_address}{Colors.END}")
-    print(f"Search range: {hex(MAIN_START)} - {hex(MAIN_END)}")
+    print(f"{Colors.YELLOW}Target address: {CONFIG['TARGET_ADDRESS']}{Colors.END}")
+    print(f"Search range: {hex(CONFIG['MAIN_START'])} - {hex(CONFIG['MAIN_END'])}")
     print(f"Total keys: {format_large_number(total_range)}")
-    print(f"Chunk size: {format_large_number(CHUNK_SIZE)} (auto-adjusted)")
-    print(f"Min chunk size: {MIN_CHUNK_SIZE}")
-    print(f"Workers: {MAX_WORKERS}\n")
+    print(f"Chunk size: {format_large_number(CONFIG['CHUNK_SIZE'])} (auto-adjusted)")
+    print(f"Min chunk size: {CONFIG['MIN_CHUNK_SIZE']}")
+    print(f"Workers: {CONFIG['MAX_WORKERS']}\n")
     
     try:
         start_time = time.time()
         while True:
             current_time = time.time()
-            if current_time - last_status_time > STATUS_INTERVAL:
+            if current_time - last_status_time > CONFIG['STATUS_INTERVAL']:
                 total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
                 elapsed = current_time - start_time
                 keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
@@ -192,13 +199,13 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
                 show_status(checked_ranges)
                 last_status_time = current_time
             
-            if found_key := check_random_chunk(target_address, checked_ranges):
+            if found_key := check_random_chunk(CONFIG['TARGET_ADDRESS'], checked_ranges):
                 print(f"\n{Colors.GREEN}Key found!{Colors.END}")
                 print(f"Private key: {found_key}")
-                with open(FOUND_KEYS_FILE, 'a') as f:
+                with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
                     f.write(f"{time.ctime()}\n")
                     f.write(f"Private: {found_key}\n")
-                    f.write(f"Address: {target_address}\n\n")
+                    f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
                 break
                 
     except KeyboardInterrupt:
