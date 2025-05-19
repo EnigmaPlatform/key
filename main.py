@@ -4,12 +4,12 @@ import base58
 import time
 import json
 import os
-from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
 import coincurve
 from typing import List, Dict, Optional
+from functools import lru_cache
 
 class Colors:
     GREEN = '\033[92m'
@@ -17,15 +17,15 @@ class Colors:
     YELLOW = '\033[93m'
     END = '\033[0m'
 
-# Configuration
+# Конфигурация
 CHECKPOINT_FILE = "checked_ranges.json"
 FOUND_KEYS_FILE = "found_keys.txt"
 CHUNK_SIZE = 20_000_000
 MIN_CHUNK_SIZE = 1
-MAIN_START = 0x1938EC6E3F2A70000
-MAIN_END = 0x1AEDF7475BB6D0000
-BATCH_SIZE = 20_000_000
-MAX_WORKERS = min(12, (os.cpu_count() or 1) * 2)
+MAIN_START = 0x1938ec6e3f2a70000
+MAIN_END = 0x1aedf7475bb6d0000
+BATCH_SIZE = 5_000_000  # Уменьшенный размер батча для лучшего распределения
+MAX_WORKERS = 8
 SAVE_INTERVAL = 5
 STATUS_INTERVAL = 30
 
@@ -58,58 +58,49 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[tuple]:
     if remaining <= 0:
         return None
     
-    # Get all unverified ranges first
-    unverified_ranges = []
+    # Если осталось меньше 2% от общего диапазона, проверяем все оставшееся
+    if remaining < (MAIN_END - MAIN_START + 1) * 0.02:
+        return MAIN_START + total_checked, MAIN_END
+    
+    # Адаптивный размер чанка
+    adaptive_chunk_size = min(CHUNK_SIZE, max(MIN_CHUNK_SIZE, remaining // 100))
+    
+    # Находим первый непроверенный диапазон
     last_end = MAIN_START - 1
-    
-    # Sort checked ranges by start
-    sorted_ranges = sorted(ranges, key=lambda x: x['start'])
-    
-    for r in sorted_ranges:
+    for r in sorted(ranges, key=lambda x: x['start']):
         if r['start'] > last_end + 1:
-            unverified_ranges.append((last_end + 1, r['start'] - 1))
+            unverified_start = last_end + 1
+            unverified_end = r['start'] - 1
+            chunk_size = min(adaptive_chunk_size, unverified_end - unverified_start + 1)
+            start = random.randint(unverified_start, unverified_end - chunk_size + 1)
+            return start, start + chunk_size - 1
         last_end = max(last_end, r['end'])
     
     if last_end < MAIN_END:
-        unverified_ranges.append((last_end + 1, MAIN_END))
+        unverified_start = last_end + 1
+        chunk_size = min(adaptive_chunk_size, MAIN_END - unverified_start + 1)
+        return unverified_start, unverified_start + chunk_size - 1
     
-    # Select a random unverified range
-    if not unverified_ranges:
-        return None
-    
-    selected_range = random.choice(unverified_ranges)
-    range_start, range_end = selected_range
-    range_size = range_end - range_start + 1
-    
-    # If the range is small, return the whole thing
-    if range_size <= CHUNK_SIZE * 2:  # Use *2 to prevent too small chunks
-        return range_start, range_end
-    
-    # Otherwise select a random chunk within this range
-    chunk_size = min(CHUNK_SIZE, range_size)
-    start = random.randint(range_start, range_end - chunk_size + 1)
-    end = start + chunk_size - 1
-    
-    return start, end
+    return None
 
+@lru_cache(maxsize=100000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
         priv = bytes.fromhex(private_key_hex)
         pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
-        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
+        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
         extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
 
-def process_batch(batch: List[str], target: str) -> Optional[str]:
-    for pk in batch:
-        try:
-            if private_to_address(pk) == target:
-                return pk
-        except:
-            continue
+def process_batch(batch_start: int, batch_end: int, target: str) -> Optional[str]:
+    for k in range(batch_start, batch_end + 1):
+        private_key_hex = f"{k:064x}"
+        address = private_to_address(private_key_hex)
+        if address == target:
+            return private_key_hex
     return None
 
 def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
@@ -125,10 +116,10 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     try:
         with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=init_worker) as executor:
             futures = []
-            for batch_start in range(start, end + 1, BATCH_SIZE):
-                batch_end = min(batch_start + BATCH_SIZE - 1, end)
-                batch = [format(k, '064x') for k in range(batch_start, batch_end + 1)]
-                futures.append(executor.submit(process_batch, batch, target))
+            batch_size = max(BATCH_SIZE, (end - start + 1) // (MAX_WORKERS * 4))
+            for batch_start in range(start, end + 1, batch_size):
+                batch_end = min(batch_start + batch_size - 1, end)
+                futures.append(executor.submit(process_batch, batch_start, batch_end, target))
             
             for future in as_completed(futures):
                 if result := future.result():
@@ -148,6 +139,16 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     
     return found_key
 
+def format_large_number(n: int) -> str:
+    if n < 1e6:
+        return f"{n:,}"
+    elif n < 1e9:
+        return f"{n/1e6:,.2f}M"
+    elif n < 1e12:
+        return f"{n/1e9:,.2f}B"
+    else:
+        return f"{n/1e12:,.2f}T"
+
 def show_status(checked: List[Dict]):
     if not checked:
         print(f"{Colors.YELLOW}No ranges checked yet{Colors.END}")
@@ -158,9 +159,9 @@ def show_status(checked: List[Dict]):
     percent = (total_checked / total_range) * 100 if total_range > 0 else 0
     
     print(f"\n{Colors.YELLOW}=== Status ===")
-    print(f"Checked: {total_checked:,} keys")
-    print(f"Progress: {percent:.6f}%")
-    print(f"Remaining: {max(0, total_range - total_checked):,} keys")
+    print(f"Checked: {format_large_number(total_checked)} keys")
+    print(f"Progress: {percent:.12f}%")
+    print(f"Remaining: {format_large_number(max(0, total_range - total_checked))} keys")
     print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
     print(f"=================={Colors.END}")
 
@@ -171,9 +172,9 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
     
     print(f"{Colors.YELLOW}Target address: {target_address}{Colors.END}")
     print(f"Search range: {hex(MAIN_START)} - {hex(MAIN_END)}")
-    print(f"Total keys: {total_range:,}")
-    print(f"Chunk size: {CHUNK_SIZE:,} (auto-adjusted)")
-    print(f"Min chunk size: {MIN_CHUNK_SIZE:,}")
+    print(f"Total keys: {format_large_number(total_range)}")
+    print(f"Chunk size: {format_large_number(CHUNK_SIZE)} (auto-adjusted)")
+    print(f"Min chunk size: {MIN_CHUNK_SIZE}")
     print(f"Workers: {MAX_WORKERS}\n")
     
     try:
@@ -185,8 +186,8 @@ def main(target_address="1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"):
                 elapsed = current_time - start_time
                 keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
                 
-                print(f"\n{Colors.YELLOW}[Progress] Checked: {total_checked:,} keys | "
-                      f"Speed: {keys_per_sec:,.0f} keys/sec | "
+                print(f"\n{Colors.YELLOW}[Progress] Checked: {format_large_number(total_checked)} keys | "
+                      f"Speed: {format_large_number(int(keys_per_sec))} keys/sec | "
                       f"Elapsed: {elapsed:.1f}s{Colors.END}")
                 show_status(checked_ranges)
                 last_status_time = current_time
