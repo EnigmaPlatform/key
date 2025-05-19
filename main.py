@@ -30,7 +30,7 @@ CONFIG = {
     'MAX_WORKERS': 12,
     'SAVE_INTERVAL': 5,
     'STATUS_INTERVAL': 5,
-    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
+    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"
 }
 
 def init_worker():
