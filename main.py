@@ -90,7 +90,7 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
         h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest())
         extended = b'\x00' + h160
-        checksum = hashlib.sha256(hashlib.sha256(extended).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest())[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
     except:
         return None
