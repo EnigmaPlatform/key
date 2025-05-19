@@ -10,7 +10,7 @@ from functools import lru_cache
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import signal
 import multiprocessing
-from bitcoinutils import PrivateKey  # Новая оптимизированная библиотека
+from bitcoin-utils import PrivateKey  # Новая оптимизированная библиотека
 
 class Colors:
     GREEN = '\033[92m'
