@@ -23,13 +23,13 @@ CONFIG = {
     'CHECKPOINT_FILE': "checked_ranges.json",
     'FOUND_KEYS_FILE': "found_keys.txt",
     'CHUNK_SIZE': 10_000_000,
-    'MIN_CHUNK_SIZE': 1,
-    'MAIN_START': 0x349b84b6431a3c4ef1,
+    'MIN_CHUNK_SIZE': 1_000,
+    'MAIN_START': 0x349b84b6431a4c4ef1,
     'MAIN_END': 0x349b84b6431a6c4ef1,
-    'BATCH_SIZE': 1_000_000,
-    'MAX_WORKERS': 12,
+    'BATCH_SIZE': 100_000,
+    'MAX_WORKERS': multiprocessing.cpu_count(),
     'SAVE_INTERVAL': 5,
-    'STATUS_INTERVAL': 5,
+    'STATUS_INTERVAL': 60,
     'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR"
 }
 
@@ -37,17 +37,26 @@ def init_worker():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 def load_checked_ranges() -> List[Dict]:
-    if os.path.exists(CONFIG['CHECKPOINT_FILE']):
-        try:
-            with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
-                return json.load(f)
-        except:
-            return []
-    return []
+    if not os.path.exists(CONFIG['CHECKPOINT_FILE']):
+        return []
+    
+    try:
+        with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            return [r for r in data if isinstance(r, dict) and 
+                   'start' in r and 'end' in r and r['start'] <= r['end']]
+    except Exception as e:
+        print(f"{Colors.RED}Error loading checkpoint file: {e}{Colors.END}")
+        return []
 
 def save_checked_ranges(ranges: List[Dict]):
-    with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
-        json.dump(ranges, f, indent=2)
+    try:
+        with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
+            json.dump(ranges, f, indent=2)
+    except Exception as e:
+        print(f"{Colors.RED}Error saving checkpoint file: {e}{Colors.END}")
 
 def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
     return any(r['start'] <= start <= r['end'] or r['start'] <= end <= r['end'] for r in ranges)
@@ -78,10 +87,12 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
     if not unverified:
         return None
     
-    # Выбираем только валидные диапазоны
     valid_ranges = []
     for start, end in unverified:
-        if start >= CONFIG['MAIN_START'] and end <= CONFIG['MAIN_END'] and start <= end:
+        if (start >= CONFIG['MAIN_START'] and 
+            end <= CONFIG['MAIN_END'] and 
+            start <= end and 
+            end - start + 1 >= CONFIG['MIN_CHUNK_SIZE']):
             valid_ranges.append((start, end))
     
     if not valid_ranges:
@@ -90,25 +101,19 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
     range_start, range_end = random.choice(valid_ranges)
     range_size = range_end - range_start + 1
     
-    # Безопасный расчет размера чанка
     chunk_size = min(
         CONFIG['CHUNK_SIZE'],
         max(CONFIG['MIN_CHUNK_SIZE'], range_size // 10),
-        range_size  # Не больше самого диапазона
+        range_size
     )
     
-    # Гарантируем, что не выйдем за границы
     max_possible_start = range_end - chunk_size + 1
     start = random.randint(range_start, max_possible_start)
     end = start + chunk_size - 1
     
-    # Последняя проверка границ
-    start = max(start, CONFIG['MAIN_START'])
-    end = min(end, CONFIG['MAIN_END'])
-    
-    return start, end
+    return max(start, CONFIG['MAIN_START']), min(end, CONFIG['MAIN_END'])
 
-@lru_cache(maxsize=1000000)
+@lru_cache(maxsize=1_000_000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
         priv = bytes.fromhex(private_key_hex)
@@ -195,20 +200,23 @@ def show_status(checked: List[Dict]):
         print(f"{Colors.YELLOW}No ranges checked yet{Colors.END}")
         return
     
-    total_checked = sum(r['end']-r['start']+1 for r in checked)
-    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
-    percent = (total_checked / total_range) * 100 if total_range > 0 else 0
-    
-    print(f"\n{Colors.YELLOW}=== Status ===")
-    print(f"Checked: {format_large_number(total_checked)} keys")
-    print(f"Progress: {percent:.12f}%")
-    print(f"Remaining: {format_large_number(max(0, total_range - total_checked))} keys")
-    if checked:
-        print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
-    print(f"=================={Colors.END}")
+    try:
+        total_checked = sum(max(0, r['end']-r['start']+1) for r in checked)
+        total_range = max(1, CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1)
+        percent = min(100, (total_checked / total_range) * 100)
+        
+        print(f"\n{Colors.YELLOW}=== Status ===")
+        print(f"Checked: {format_large_number(total_checked)} keys")
+        print(f"Progress: {percent:.8f}%")
+        print(f"Remaining: {format_large_number(max(0, total_range - total_checked))} keys")
+        if checked:
+            print(f"Last range: {hex(checked[-1]['start'])} - {hex(checked[-1]['end'])}")
+        print(f"=================={Colors.END}")
+    except Exception as e:
+        print(f"{Colors.RED}Error calculating stats: {e}{Colors.END}")
 
 def show_final_stats(checked: List[Dict], start_time: float):
-    total_checked = sum(r['end']-r['start']+1 for r in checked) if checked else 0
+    total_checked = sum(max(0, r['end']-r['start']+1) for r in checked) if checked else 0
     elapsed = time.time() - start_time
     keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
     
@@ -223,13 +231,12 @@ def show_final_stats(checked: List[Dict], start_time: float):
 def main(target_address=None):
     checked_ranges = load_checked_ranges()
     last_status_time = time.time()
-    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
     start_time = time.time()
     
     target = target_address if target_address else CONFIG['TARGET_ADDRESS']
     print(f"{Colors.YELLOW}Target address: {target}{Colors.END}")
     print(f"Search range: {hex(CONFIG['MAIN_START'])} - {hex(CONFIG['MAIN_END'])}")
-    print(f"Total keys: {format_large_number(total_range)}")
+    print(f"Total keys: {format_large_number(CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1)}")
     print(f"Chunk size: {format_large_number(CONFIG['CHUNK_SIZE'])} (auto-adjusted)")
     print(f"Min chunk size: {CONFIG['MIN_CHUNK_SIZE']}")
     print(f"Workers: {CONFIG['MAX_WORKERS']}\n")
@@ -239,7 +246,7 @@ def main(target_address=None):
         while True:
             current_time = time.time()
             if current_time - last_status_time > CONFIG['STATUS_INTERVAL']:
-                total_checked = sum(r['end']-r['start']+1 for r in checked_ranges)
+                total_checked = sum(max(0, r['end']-r['start']+1) for r in checked_ranges)
                 elapsed = current_time - start_time
                 keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
                 
