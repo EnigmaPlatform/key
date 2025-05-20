@@ -18,7 +18,7 @@ class Colors:
     BLUE = '\033[94m'
     END = '\033[0m'
 
-# Конфигурация
+# Конфигурация с безопасными границами
 CONFIG = {
     'CHECKPOINT_FILE': "checked_ranges.json",
     'FOUND_KEYS_FILE': "found_keys.txt",
@@ -58,9 +58,15 @@ def get_unverified_ranges(ranges: List[Dict]) -> List[Tuple[int, int]]:
     last_end = CONFIG['MAIN_START'] - 1
     
     for r in sorted_ranges:
-        if r['start'] > last_end + 1:
-            unverified.append((last_end + 1, r['start'] - 1))
-        last_end = max(last_end, r['end'])
+        current_start = max(r['start'], CONFIG['MAIN_START'])
+        current_end = min(r['end'], CONFIG['MAIN_END'])
+        
+        if current_start > last_end + 1:
+            unverified_start = last_end + 1
+            unverified_end = current_start - 1
+            if unverified_start <= unverified_end:
+                unverified.append((unverified_start, unverified_end))
+        last_end = max(last_end, current_end)
     
     if last_end < CONFIG['MAIN_END']:
         unverified.append((last_end + 1, CONFIG['MAIN_END']))
@@ -72,44 +78,52 @@ def get_random_chunk(ranges: List[Dict]) -> Optional[Tuple[int, int]]:
     if not unverified:
         return None
     
-    range_start, range_end = random.choice(unverified)
+    # Выбираем только валидные диапазоны
+    valid_ranges = []
+    for start, end in unverified:
+        if start >= CONFIG['MAIN_START'] and end <= CONFIG['MAIN_END'] and start <= end:
+            valid_ranges.append((start, end))
+    
+    if not valid_ranges:
+        return None
+    
+    range_start, range_end = random.choice(valid_ranges)
     range_size = range_end - range_start + 1
     
-    if range_size <= CONFIG['CHUNK_SIZE'] * 2:
-        return range_start, range_end
+    # Безопасный расчет размера чанка
+    chunk_size = min(
+        CONFIG['CHUNK_SIZE'],
+        max(CONFIG['MIN_CHUNK_SIZE'], range_size // 10),
+        range_size  # Не больше самого диапазона
+    )
     
-    adaptive_size = min(CONFIG['CHUNK_SIZE'], max(CONFIG['MIN_CHUNK_SIZE'], range_size // 10))
-    start = random.randint(range_start, range_end - adaptive_size + 1)
-    return start, start + adaptive_size - 1
+    # Гарантируем, что не выйдем за границы
+    max_possible_start = range_end - chunk_size + 1
+    start = random.randint(range_start, max_possible_start)
+    end = start + chunk_size - 1
+    
+    # Последняя проверка границ
+    start = max(start, CONFIG['MAIN_START'])
+    end = min(end, CONFIG['MAIN_END'])
+    
+    return start, end
 
 @lru_cache(maxsize=1000000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     try:
-        # Конвертируем приватный ключ в байты
         priv = bytes.fromhex(private_key_hex)
-        
-        # Генерируем публичный ключ (сжатый формат)
         pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
-        
-        # SHA-256 хеш публичного ключа
         sha256_hash = hashlib.sha256(pub_key).digest()
         
-        # RIPEMD-160 хеш от SHA-256
         ripemd160 = hashlib.new('ripemd160')
         ripemd160.update(sha256_hash)
         ripemd160_hash = ripemd160.digest()
         
-        # Добавляем версионный байт (0x00 для Mainnet)
         versioned_payload = b'\x00' + ripemd160_hash
-        
-        # Вычисляем контрольную сумму (первые 4 байта двойного SHA-256)
         first_sha = hashlib.sha256(versioned_payload).digest()
         checksum = hashlib.sha256(first_sha).digest()[:4]
         
-        # Собираем полный payload
         full_payload = versioned_payload + checksum
-        
-        # Кодируем в Base58
         return base58.b58encode(full_payload).decode('utf-8')
     except Exception as e:
         print(f"{Colors.RED}Error generating address: {e}{Colors.END}")
@@ -125,7 +139,8 @@ def process_batch(batch: List[str], target: str) -> Optional[str]:
 def generate_batches(start: int, end: int) -> List[List[str]]:
     batch_size = CONFIG['BATCH_SIZE']
     batches = []
-    current = start
+    current = max(start, CONFIG['MAIN_START'])
+    end = min(end, CONFIG['MAIN_END'])
     
     while current <= end:
         batch_end = min(current + batch_size - 1, end)
@@ -169,11 +184,11 @@ def check_random_chunk(target: str, ranges: List[Dict]) -> Optional[str]:
     return found_key
 
 def format_large_number(n: int) -> str:
-    for unit in ['', 'K', 'M', 'B', 'T']:
+    for unit in ['', 'K', 'M', 'B', 'T', 'P']:
         if abs(n) < 1000:
             return f"{n:,.0f}{unit}"
         n /= 1000
-    return f"{n:,.0f}P"
+    return f"{n:,.0f}?"
 
 def show_status(checked: List[Dict]):
     if not checked:
@@ -239,7 +254,6 @@ def main(target_address=None):
                 found_key = result
                 break
             
-            # Проверка завершения полного перебора
             unverified = get_unverified_ranges(checked_ranges)
             if not unverified:
                 break
