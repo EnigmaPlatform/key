@@ -14,7 +14,7 @@ CONFIG = {
     'END_KEY': 0x349b84b6431a6c4ef1,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
-    'BATCH_SIZE': 1_000_000,  # Размер блока для каждого процесса
+    'BATCH_SIZE': 10_000_000,  # Размер блока для каждого процесса
     'PROCESSES': cpu_count(),  # Используем все ядра
     'STATUS_INTERVAL': 5  # Интервал обновления статуса
 }
