@@ -25,9 +25,9 @@ CONFIG = {
     'BATCH_SIZE': 10_000_000,  # 10M ключей на блок
     'MAX_WORKERS': multiprocessing.cpu_count() * 2,
     'STATUS_INTERVAL': 5,
-    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-    'START': 0x1A12F1DA9D7000000,
-    'END': 0x1A12F1DA9DFFFFFFF,
+    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
+    'START': 0x349b84b6431a6b4ef1,
+    'END': 0x349b84b6431a6c4ef1,
     'HEX_PATTERN': '1a12f1d',
     'BANNED_SUFFIXES': ['aaaa', 'ffff'],
     'BIT_TRANSITIONS_RANGE': (7, 9)
