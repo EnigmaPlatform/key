@@ -12,27 +12,29 @@ CONFIG = {
     'END_KEY': 0x1A12F1DA9DFFFFFFF,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
-    'BATCH_SIZE': 10_000_000,  # Размер блока для сохранения прогресса
+    'SAVE_INTERVAL': 10_000_000,  # Сохранять каждый 10M ключей
     'STATUS_INTERVAL': 5  # Интервал обновления статуса (секунды)
 }
 
-def load_progress():
-    """Загружает прогресс из файла"""
+def load_last_key():
+    """Загружает последний сохраненный ключ"""
     if os.path.exists(CONFIG['CHECKPOINT_FILE']):
         try:
             with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                return max(int(k) for k in data.keys())
         except:
             pass
-    return {'last_key': CONFIG['START_KEY'], 'keys_checked': 0, 'checked_ranges': []}
+    return CONFIG['START_KEY']
 
-def save_progress(progress):
-    """Сохраняет текущий прогресс"""
-    with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
-        json.dump(progress, f)
+def save_progress(key):
+    """Сохраняет прогресс"""
+    progress = {str(key): time.time()}
+    with open(CONFIG['CHECKPOINT_FILE'], 'a') as f:
+        f.write(json.dumps(progress) + '\n')
 
 def private_to_address(private_key_hex):
-    """Конвертирует приватный ключ в адрес"""
+    """Оптимизированное преобразование ключа в адрес"""
     priv = bytes.fromhex(private_key_hex)
     pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
     h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
@@ -40,34 +42,19 @@ def private_to_address(private_key_hex):
     checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
     return base58.b58encode(extended + checksum).decode('utf-8')
 
-def format_speed(speed):
-    """Форматирует скорость перебора"""
-    if speed >= 1_000_000:
-        return f"{speed/1_000_000:.1f}M keys/s"
-    return f"{speed/1_000:.1f}K keys/s"
-
 def main():
-    # Загрузка прогресса
-    progress = load_progress()
-    current_key = progress['last_key']
-    keys_checked = progress['keys_checked']
-    checked_ranges = progress['checked_ranges']
-    
-    # Инициализация
-    start_time = time.time()
-    last_status_time = time.time()
-    last_batch_saved = current_key // CONFIG['BATCH_SIZE']
+    current_key = load_last_key()
+    keys_checked = 0
+    start_time = last_save_time = last_status_time = time.time()
     
     print("\n=== Bitcoin Puzzle Solver ===")
     print(f"Целевой адрес: {CONFIG['TARGET_ADDRESS']}")
     print(f"Диапазон: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
-    print(f"Всего ключей: {(CONFIG['END_KEY']-CONFIG['START_KEY']+1):,}")
-    print(f"Продолжаем с: {hex(current_key)}")
+    print(f"Начинаем с: {hex(current_key)}")
     print("==============================")
 
     try:
         while current_key <= CONFIG['END_KEY']:
-            # Проверка ключа
             private_key = f"{current_key:064x}"
             address = private_to_address(private_key)
             
@@ -84,54 +71,35 @@ def main():
             keys_checked += 1
             current_key += 1
             
-            # Сохранение прогресса по блокам
-            current_batch = current_key // CONFIG['BATCH_SIZE']
-            if current_batch > last_batch_saved:
-                batch_start = current_batch * CONFIG['BATCH_SIZE']
-                batch_end = (current_batch + 1) * CONFIG['BATCH_SIZE'] - 1
-                checked_ranges.append({
-                    'start': batch_start,
-                    'end': min(batch_end, CONFIG['END_KEY']),
-                    'keys': CONFIG['BATCH_SIZE']
-                })
-                last_batch_saved = current_batch
-                progress = {
-                    'last_key': current_key,
-                    'keys_checked': keys_checked,
-                    'checked_ranges': checked_ranges
-                }
-                save_progress(progress)
+            # Сохранение прогресса
+            if keys_checked % CONFIG['SAVE_INTERVAL'] == 0:
+                save_progress(current_key)
+                last_save_time = time.time()
             
             # Вывод статуса
             current_time = time.time()
             if current_time - last_status_time >= CONFIG['STATUS_INTERVAL']:
                 elapsed = current_time - start_time
-                speed = int(keys_checked / elapsed) if elapsed > 0 else 0
+                speed = int(keys_checked / elapsed)
                 total_keys = CONFIG['END_KEY'] - CONFIG['START_KEY'] + 1
-                percent = (keys_checked / total_keys) * 100
+                processed_keys = current_key - CONFIG['START_KEY']
+                percent = (processed_keys / total_keys) * 100
                 
                 print(f"\r[Прогресс] {percent:.2f}% | "
                       f"Ключей: {keys_checked:,} | "
-                      f"Скорость: {format_speed(speed)} | "
+                      f"Скорость: {speed:,} keys/s | "
                       f"Текущий: {hex(current_key)}", end="", flush=True)
                 
                 last_status_time = current_time
     
     except KeyboardInterrupt:
         print("\nОстановлено пользователем. Сохраняем прогресс...")
-    
-    # Финализация
-    progress = {
-        'last_key': current_key,
-        'keys_checked': keys_checked,
-        'checked_ranges': checked_ranges
-    }
-    save_progress(progress)
+        save_progress(current_key)
     
     elapsed = time.time() - start_time
     print(f"\n\nПоиск завершен. Проверено ключей: {keys_checked:,}")
     print(f"Общее время: {elapsed:.1f} секунд")
-    print(f"Средняя скорость: {format_speed(int(keys_checked/elapsed))}")
+    print(f"Средняя скорость: {int(keys_checked/elapsed):,} keys/s")
     print(f"Последняя позиция: {hex(current_key)}")
 
 if __name__ == "__main__":
