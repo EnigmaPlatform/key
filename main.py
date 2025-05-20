@@ -22,11 +22,15 @@ CONFIG = {
     'CHECKPOINT_FILE': "checked_ranges.json",
     'FOUND_KEYS_FILE': "found_keys.txt",
     'BATCH_SIZE': 100_000,
-    'MAX_WORKERS': 12,
-    'STATUS_INTERVAL': 1,
+    'MAX_WORKERS': multiprocessing.cpu_count(),
+    'STATUS_INTERVAL': 5,
+    'PRIORITY_START': 0x1A12F1DA9D7015A3F,  # Зона A (высокий приоритет)
+    'PRIORITY_END': 0x1A12F1DA9D701FFFF,
     'MAIN_START': 0x1A12F1DA9D7000000,
-    'MAIN_END': 0x1A32F2ECBE8000000 ,
-    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU"
+    'MAIN_END': 0x1A32F2ECBE8000000,
+    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
+    'HEX_PATTERNS': ['1a12f1d', '15a3f'],  # Ключевые паттерны
+    'BANNED_PATTERNS': ['aaaa', 'ffff']    # Запрещенные комбинации
 }
 
 def init_worker():
@@ -36,11 +40,9 @@ def load_checked_ranges() -> List[Dict]:
     if os.path.exists(CONFIG['CHECKPOINT_FILE']):
         try:
             with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
-                data = json.load(f)
-                print(f"{Colors.CYAN}Loaded {len(data)} checked ranges from file{Colors.END}")
-                return data
-        except Exception as e:
-            print(f"{Colors.RED}Error loading checkpoints: {e}{Colors.END}")
+                return json.load(f)
+        except:
+            return []
     return []
 
 def save_checked_ranges(ranges: List[Dict]):
@@ -48,13 +50,19 @@ def save_checked_ranges(ranges: List[Dict]):
         with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
             json.dump(ranges, f, indent=2)
     except Exception as e:
-        print(f"{Colors.RED}Error saving checkpoints: {e}{Colors.END}")
+        print(f"{Colors.RED}Checkpoint save error: {e}{Colors.END}")
 
 def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
-    for r in ranges:
-        if r['start'] <= start and r['end'] >= end:
-            return True
-    return False
+    return any(r['start'] <= start and r['end'] >= end for r in ranges)
+
+def is_valid_key(key: int) -> bool:
+    """Проверка ключа по всем выявленным закономерностям"""
+    hex_key = hex(key)[2:]
+    return (
+        any(p in hex_key for p in CONFIG['HEX_PATTERNS']) and
+        not any(b in hex_key for b in CONFIG['BANNED_PATTERNS']) and
+        7 <= bin(key).count('01') <= 9
+    )
 
 @lru_cache(maxsize=100000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
@@ -65,67 +73,64 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         extended = b'\x00' + h160
         checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
         return base58.b58encode(extended + checksum).decode('utf-8')
-    except Exception as e:
-        print(f"{Colors.RED}Address gen error: {e}{Colors.END}")
+    except:
         return None
 
-def process_range(start: int, end: int, target: str) -> Optional[str]:
-    """Обрабатывает диапазон ключей и возвращает найденный ключ"""
+def process_range(start: int, end: int, target: str) -> Optional[Tuple[int, str]]:
+    """Обрабатывает диапазон с проверкой валидности ключа"""
     for k in range(start, end + 1):
+        if not is_valid_key(k):
+            continue
+            
         private_key = f"{k:064x}"
-        address = private_to_address(private_key)
-        if address == target:
-            return private_key
+        if private_to_address(private_key) == target:
+            return (k, private_key)
     return None
 
 def generate_search_ranges(checked_ranges: List[Dict]) -> List[Tuple[int, int]]:
-    """Генерирует непроверенные диапазоны с учетом сохраненных данных"""
-    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
-    workers = CONFIG['MAX_WORKERS']
-    chunk_size = total_range // workers
+    """Генерирует приоритетные диапазоны поиска"""
     ranges = []
     
-    for i in range(workers):
-        start = CONFIG['MAIN_START'] + i * chunk_size
-        end = start + chunk_size - 1 if i < workers - 1 else CONFIG['MAIN_END']
+    # 1. Проверяем зону высокого приоритета
+    if not is_range_checked(CONFIG['PRIORITY_START'], CONFIG['PRIORITY_END'], checked_ranges):
+        ranges.append((CONFIG['PRIORITY_START'], CONFIG['PRIORITY_END']))
+    
+    # 2. Делим основной диапазон на части
+    total_range = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
+    chunk_size = total_range // (CONFIG['MAX_WORKERS'] * 4)  # Меньшие чанки для балансировки
+    
+    for i in range(0, total_range, chunk_size):
+        start = CONFIG['MAIN_START'] + i
+        end = min(start + chunk_size - 1, CONFIG['MAIN_END'])
         
         if not is_range_checked(start, end, checked_ranges):
             ranges.append((start, end))
     
     return ranges
 
-def display_status(start_time: float, checked_count: int, last_range: Tuple[int, int] = None):
-    """Выводит текущую статистику в терминал"""
+def display_status(start_time: float, checked: int, total: int, last_range: Tuple[int, int]):
     elapsed = time.time() - start_time
-    total_keys = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
-    percent = (checked_count / total_keys) * 100
-    speed = int(checked_count / elapsed) if elapsed > 0 else 0
+    percent = (checked / total) * 100
+    speed = int(checked / elapsed) if elapsed > 0 else 0
     
-    print(f"\n{Colors.YELLOW}=== Поиск активен ===")
-    print(f"Проверено: {checked_count:,} ключей ({percent:.2f}%)")
-    print(f"Скорость: {speed:,} ключей/сек")
-    print(f"Затрачено времени: {elapsed:.1f}s")
-    if last_range:
-        print(f"Текущий диапазон: {hex(last_range[0])} - {hex(last_range[1])}")
-    print(f"===================={Colors.END}")
+    print(f"\n{Colors.YELLOW}=== Статус ===")
+    print(f"Прогресс: {percent:.2f}% ({checked:,}/{total:,})")
+    print(f"Скорость: {speed:,} keys/s")
+    print(f"Диапазон: {hex(last_range[0])}-{hex(last_range[1])}")
+    print(f"================{Colors.END}")
 
 def search_keys(target: str, checked_ranges: List[Dict]) -> Optional[str]:
-    """Основная функция поиска с сохранением прогресса"""
-    search_ranges = generate_search_ranges(checked_ranges)
-    if not search_ranges:
-        print(f"{Colors.BLUE}Все диапазоны уже проверены{Colors.END}")
-        return None
-    
+    total_keys = CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1
     start_time = time.time()
     last_status_time = time.time()
-    found_key = None
     checked_count = sum(r['end']-r['start']+1 for r in checked_ranges)
+    found_key = None
     
     with ProcessPoolExecutor(max_workers=CONFIG['MAX_WORKERS'], initializer=init_worker) as executor:
         futures = {}
         
-        # Запускаем задачи для всех непроверенных диапазонов
-        for start, end in search_ranges:
+        # Запускаем задачи для всех диапазонов
+        for start, end in generate_search_ranges(checked_ranges):
             future = executor.submit(process_range, start, end, target)
             futures[future] = (start, end)
         
@@ -135,60 +140,48 @@ def search_keys(target: str, checked_ranges: List[Dict]) -> Optional[str]:
             current_time = time.time()
             
             # Обновляем статистику
+            checked_count += end - start + 1
             if current_time - last_status_time > CONFIG['STATUS_INTERVAL']:
-                checked_count += end - start + 1
-                display_status(start_time, checked_count, (start, end))
+                display_status(start_time, checked_count, total_keys, (start, end))
                 last_status_time = current_time
             
             # Проверяем результат
             if result := future.result():
-                found_key = result
-                # Отменяем все остальные задачи
+                found_key = result[1]
                 for f in futures:
                     f.cancel()
                 break
             
-            # Сохраняем проверенный диапазон
+            # Сохраняем прогресс
             checked_ranges.append({'start': start, 'end': end, 'time': current_time})
-            if len(checked_ranges) % 10 == 0:  # Сохраняем каждые 10 диапазонов
-                save_checked_ranges(checked_ranges)
+            save_checked_ranges(checked_ranges)
     
-    # Финализируем сохранение
-    save_checked_ranges(checked_ranges)
     return found_key
 
-def main(target_address=None):
-    """Главная функция с обработкой аргументов"""
-    target = target_address if target_address else CONFIG['TARGET_ADDRESS']
+def main():
     checked_ranges = load_checked_ranges()
+    target = CONFIG['TARGET_ADDRESS']
     
-    print(f"\n{Colors.CYAN}=== Начало поиска ===")
+    print(f"\n{Colors.CYAN}=== Настройки поиска ===")
     print(f"Целевой адрес: {target}")
-    print(f"Диапазон: {hex(CONFIG['MAIN_START'])} - {hex(CONFIG['MAIN_END'])}")
-    print(f"Всего ключей: {(CONFIG['MAIN_END'] - CONFIG['MAIN_START'] + 1):,}")
-    print(f"Рабочих процессов: {CONFIG['MAX_WORKERS']}")
-    print(f"========================={Colors.END}\n")
+    print(f"Приоритетный диапазон: {hex(CONFIG['PRIORITY_START'])}-{hex(CONFIG['PRIORITY_END'])}")
+    print(f"Основной диапазон: {hex(CONFIG['MAIN_START'])}-{hex(CONFIG['MAIN_END'])}")
+    print(f"Всего ключей: {(CONFIG['MAIN_END']-CONFIG['MAIN_START']+1):,}")
+    print(f"Ядер CPU: {CONFIG['MAX_WORKERS']}")
+    print(f"============================{Colors.END}\n")
     
     try:
-        found_key = search_keys(target, checked_ranges)
-        if found_key:
-            print(f"\n{Colors.GREEN}НАЙДЕН КЛЮЧ!{Colors.END}")
-            print(f"Приватный ключ: {found_key}")
+        if found := search_keys(target, checked_ranges):
+            print(f"\n{Colors.GREEN}УСПЕХ! Найден ключ:{Colors.END} {found}")
             with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
-                f.write(f"{time.ctime()}\n")
-                f.write(f"Private: {found_key}\n")
-                f.write(f"Address: {target}\n\n")
+                f.write(f"{time.ctime()}\nKey: {found}\nAddress: {target}\n\n")
         else:
             print(f"\n{Colors.BLUE}Поиск завершен. Ключ не найден.{Colors.END}")
     except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Поиск прерван пользователем.{Colors.END}")
-    except Exception as e:
-        print(f"\n{Colors.RED}Ошибка: {e}{Colors.END}")
+        print(f"\n{Colors.YELLOW}Поиск прерван.{Colors.END}")
     finally:
         save_checked_ranges(checked_ranges)
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    import sys
-    target_addr = sys.argv[1] if len(sys.argv) > 1 else None
-    main(target_addr)
+    main()
