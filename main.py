@@ -21,8 +21,8 @@ CONFIG = {
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 300,  # 5 минут = 300 секунд
     'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-    'START_KEY': 0x400000000000000000,
-    'END_KEY': 0x7fffffffffffffffff,
+    'START_KEY': 0x74BB02D5A1ED8E42C,
+    'END_KEY': 0x74BB02D5A1ED9FFFF,
     'BATCH_PER_CORE': 5_000_000  # Увеличенный размер пакета
 }
 
