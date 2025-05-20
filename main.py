@@ -28,7 +28,7 @@ CONFIG = {
     'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
     'START': 0x349b84b6431a6b4ef1,
     'END': 0x349b84b6431a6c4ef1,
-    'HEX_PATTERN': '1a12f1d',
+    #'HEX_PATTERN': '1a12f1d',
     'BANNED_SUFFIXES': ['aaaa', 'ffff'],
     'BIT_TRANSITIONS_RANGE': (7, 9)
 }
@@ -55,13 +55,13 @@ def save_checked_ranges(ranges: List[Dict]):
 def is_range_checked(start: int, end: int, ranges: List[Dict]) -> bool:
     return any(r['start'] <= start and r['end'] >= end for r in ranges)
 
-def is_valid_key(key: int) -> bool:
-    hex_key = hex(key)[2:]
-    return (
-        CONFIG['HEX_PATTERN'] in hex_key and
-        not any(hex_key.endswith(s) for s in CONFIG['BANNED_SUFFIXES']) and
-        CONFIG['BIT_TRANSITIONS_RANGE'][0] <= bin(key).count('01') <= CONFIG['BIT_TRANSITIONS_RANGE'][1]
-    )
+#def is_valid_key(key: int) -> bool:
+    #hex_key = hex(key)[2:]
+    #return (
+        #CONFIG['HEX_PATTERN'] in hex_key and
+       # not any(hex_key.endswith(s) for s in CONFIG['BANNED_SUFFIXES']) and
+       # CONFIG['BIT_TRANSITIONS_RANGE'][0] <= bin(key).count('01') <= CONFIG['BIT_TRANSITIONS_RANGE'][1]
+   # )
 
 @lru_cache(maxsize=2_000_000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
