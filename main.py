@@ -4,6 +4,8 @@ import time
 import json
 import os
 import coincurve
+from multiprocessing import Pool, cpu_count, Manager
+import signal
 
 # Конфигурация
 CONFIG = {
@@ -12,26 +14,29 @@ CONFIG = {
     'END_KEY': 0x1A12F1DA9DFFFFFFF,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
-    'SAVE_INTERVAL': 10_000_000,  # Сохранять каждый 10M ключей
-    'STATUS_INTERVAL': 5  # Интервал обновления статуса (секунды)
+    'BATCH_SIZE': 1_000_000,  # Размер блока для каждого процесса
+    'PROCESSES': cpu_count(),  # Используем все ядра
+    'STATUS_INTERVAL': 5  # Интервал обновления статуса
 }
 
-def load_last_key():
-    """Загружает последний сохраненный ключ"""
+def init_worker():
+    """Игнорируем Ctrl+C в рабочих процессах"""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+def load_progress():
+    """Загружаем последний сохраненный прогресс"""
     if os.path.exists(CONFIG['CHECKPOINT_FILE']):
         try:
             with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
-                data = json.load(f)
-                return max(int(k) for k in data.keys())
+                return json.load(f)
         except:
             pass
-    return CONFIG['START_KEY']
+    return {'last_key': CONFIG['START_KEY'], 'checked_ranges': []}
 
-def save_progress(key):
-    """Сохраняет прогресс"""
-    progress = {str(key): time.time()}
-    with open(CONFIG['CHECKPOINT_FILE'], 'a') as f:
-        f.write(json.dumps(progress) + '\n')
+def save_progress(progress):
+    """Сохраняем прогресс"""
+    with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
+        json.dump(progress, f)
 
 def private_to_address(private_key_hex):
     """Оптимизированное преобразование ключа в адрес"""
@@ -42,65 +47,102 @@ def private_to_address(private_key_hex):
     checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
     return base58.b58encode(extended + checksum).decode('utf-8')
 
+def process_batch(args):
+    """Обрабатывает пакет ключей"""
+    start_key, end_key, found_flag = args
+    results = []
+    
+    for key in range(start_key, end_key + 1):
+        if found_flag.value:
+            break
+            
+        private_key = f"{key:064x}"
+        address = private_to_address(private_key)
+        
+        if address == CONFIG['TARGET_ADDRESS']:
+            found_flag.value = True
+            return (True, key, private_key)
+    
+    return (False, end_key, end_key - start_key + 1)
+
 def main():
-    current_key = load_last_key()
-    keys_checked = 0
-    start_time = last_save_time = last_status_time = time.time()
+    progress = load_progress()
+    current_key = progress['last_key']
+    manager = Manager()
+    found_flag = manager.Value('b', False)
     
     print("\n=== Bitcoin Puzzle Solver ===")
     print(f"Целевой адрес: {CONFIG['TARGET_ADDRESS']}")
     print(f"Диапазон: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
-    print(f"Начинаем с: {hex(current_key)}")
+    print(f"Всего ключей: {(CONFIG['END_KEY']-CONFIG['START_KEY']+1):,}")
+    print(f"Размер блока: {CONFIG['BATCH_SIZE']:,}")
+    print(f"Процессов: {CONFIG['PROCESSES']}")
     print("==============================")
 
+    start_time = last_status_time = time.time()
+    total_keys_processed = current_key - CONFIG['START_KEY']
+    
     try:
-        while current_key <= CONFIG['END_KEY']:
-            private_key = f"{current_key:064x}"
-            address = private_to_address(private_key)
-            
-            if address == CONFIG['TARGET_ADDRESS']:
-                print(f"\n\n>>> КЛЮЧ НАЙДЕН! <<<")
-                print(f"Приватный ключ: {private_key}")
-                print(f"Hex: {hex(current_key)}")
-                with open(CONFIG['FOUND_KEYS_FILE'], "w") as f:
-                    f.write(f"Адрес: {CONFIG['TARGET_ADDRESS']}\n")
-                    f.write(f"Ключ: {private_key}\n")
-                    f.write(f"Hex: {hex(current_key)}\n")
-                return
-            
-            keys_checked += 1
-            current_key += 1
-            
-            # Сохранение прогресса
-            if keys_checked % CONFIG['SAVE_INTERVAL'] == 0:
-                save_progress(current_key)
-                last_save_time = time.time()
-            
-            # Вывод статуса
-            current_time = time.time()
-            if current_time - last_status_time >= CONFIG['STATUS_INTERVAL']:
-                elapsed = current_time - start_time
-                speed = int(keys_checked / elapsed)
-                total_keys = CONFIG['END_KEY'] - CONFIG['START_KEY'] + 1
-                processed_keys = current_key - CONFIG['START_KEY']
-                percent = (processed_keys / total_keys) * 100
+        with Pool(processes=CONFIG['PROCESSES'], initializer=init_worker) as pool:
+            while current_key <= CONFIG['END_KEY'] and not found_flag.value:
+                # Подготавливаем задания
+                batch_end = min(current_key + CONFIG['BATCH_SIZE'] - 1, CONFIG['END_KEY'])
+                batch_args = [(current_key + i * CONFIG['BATCH_SIZE'] // CONFIG['PROCESSES'],
+                              min(current_key + (i + 1) * CONFIG['BATCH_SIZE'] // CONFIG['PROCESSES'] - 1, CONFIG['END_KEY']),
+                              found_flag)
+                             for i in range(CONFIG['PROCESSES'])]
                 
-                print(f"\r[Прогресс] {percent:.2f}% | "
-                      f"Ключей: {keys_checked:,} | "
-                      f"Скорость: {speed:,} keys/s | "
-                      f"Текущий: {hex(current_key)}", end="", flush=True)
+                # Параллельная обработка
+                results = pool.map(process_batch, batch_args)
                 
-                last_status_time = current_time
+                # Обработка результатов
+                for result in results:
+                    found, last_key, keys_processed = result
+                    if found:
+                        print(f"\n\n>>> КЛЮЧ НАЙДЕН! <<<")
+                        print(f"Приватный ключ: {last_key[2]}")
+                        print(f"Hex: {hex(last_key[1])}")
+                        with open(CONFIG['FOUND_KEYS_FILE'], "w") as f:
+                            f.write(f"Адрес: {CONFIG['TARGET_ADDRESS']}\n")
+                            f.write(f"Ключ: {last_key[2]}\n")
+                            f.write(f"Hex: {hex(last_key[1])}\n")
+                        return
+                    
+                    total_keys_processed += keys_processed
+                    current_key = max(current_key, last_key + 1)
+                
+                # Сохранение прогресса
+                progress['last_key'] = current_key
+                progress['checked_ranges'].append({
+                    'start': batch_args[0][0],
+                    'end': batch_args[-1][1],
+                    'keys': CONFIG['BATCH_SIZE']
+                })
+                
+                # Вывод статуса
+                if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
+                    elapsed = time.time() - start_time
+                    speed = int(total_keys_processed / elapsed)
+                    total_keys = CONFIG['END_KEY'] - CONFIG['START_KEY'] + 1
+                    percent = (total_keys_processed / total_keys) * 100
+                    
+                    print(f"\r[Прогресс] {percent:.2f}% | "
+                          f"Ключей: {total_keys_processed:,} | "
+                          f"Скорость: {speed:,} keys/s | "
+                          f"Текущий: {hex(current_key)}", end="", flush=True)
+                    
+                    last_status_time = time.time()
+                    save_progress(progress)
     
     except KeyboardInterrupt:
         print("\nОстановлено пользователем. Сохраняем прогресс...")
-        save_progress(current_key)
     
+    # Финализация
     elapsed = time.time() - start_time
-    print(f"\n\nПоиск завершен. Проверено ключей: {keys_checked:,}")
+    print(f"\n\nПоиск завершен. Проверено ключей: {total_keys_processed:,}")
     print(f"Общее время: {elapsed:.1f} секунд")
-    print(f"Средняя скорость: {int(keys_checked/elapsed):,} keys/s")
-    print(f"Последняя позиция: {hex(current_key)}")
+    print(f"Средняя скорость: {int(total_keys_processed/elapsed):,} keys/s")
+    save_progress(progress)
 
 if __name__ == "__main__":
     main()
