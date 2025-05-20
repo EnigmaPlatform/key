@@ -6,7 +6,7 @@ on:
       target_address:
         description: 'Bitcoin address to find (compressed)'
         required: true
-        default: '19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR'
+        default: '1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU'
 
 jobs:
   find_keys:
