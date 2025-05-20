@@ -7,25 +7,23 @@ import coincurve
 from threading import Thread, Lock
 from queue import Queue
 
-# Конфигурация
 CONFIG = {
     'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
     'START_KEY': 0x1A12F1DA9D7000000,
     'END_KEY': 0x1A12F1DA9DFFFFFFF,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
-    'BATCH_SIZE': 10_000_000,  # Размер диапазона для сохранения
-    'THREADS': 8,  # Количество потоков
-    'STATUS_INTERVAL': 5  # секунды между обновлениями статуса
+    'BATCH_SIZE': 1_000_000,  # Увеличиваем размер блока для каждого потока
+    'THREADS': max(1, os.cpu_count() - 1),  # Оптимальное число потоков
+    'STATUS_INTERVAL': 5
 }
 
 class KeyScanner:
     def __init__(self):
         self.lock = Lock()
         self.progress = self.load_progress()
-        self.current_key = self.progress['last_key']
-        self.keys_checked = self.progress['keys_checked']
-        self.last_saved_batch = self.current_key // CONFIG['BATCH_SIZE']
+        self.current_batch = self.progress.get('last_batch', 0)
+        self.keys_checked = self.progress.get('keys_checked', 0)
         self.start_time = time.time()
         self.found = False
         self.queue = Queue()
@@ -38,18 +36,17 @@ class KeyScanner:
                     return json.load(f)
             except:
                 pass
-        return {'last_key': CONFIG['START_KEY'], 'keys_checked': 0, 'checked_ranges': []}
+        return {'last_batch': 0, 'keys_checked': 0, 'checked_ranges': []}
 
     def save_progress(self):
-        with self.lock:
-            progress = {
-                'last_key': self.current_key,
-                'keys_checked': self.keys_checked,
-                'checked_ranges': self.progress['checked_ranges'],
-                'timestamp': time.time()
-            }
-            with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
-                json.dump(progress, f)
+        progress = {
+            'last_batch': self.current_batch,
+            'keys_checked': self.keys_checked,
+            'checked_ranges': self.progress['checked_ranges'],
+            'timestamp': time.time()
+        }
+        with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
+            json.dump(progress, f)
 
     def private_to_address(self, private_key_hex):
         priv = bytes.fromhex(private_key_hex)
@@ -61,62 +58,63 @@ class KeyScanner:
 
     def worker(self):
         while not self.found:
-            key = self.get_next_key()
-            if key is None:
+            batch = self.get_next_batch()
+            if batch is None:
                 break
 
-            private_key = f"{key:064x}"
-            address = self.private_to_address(private_key)
+            start, end = batch
+            found_in_batch = False
             
-            if address == CONFIG['TARGET_ADDRESS']:
-                with self.lock:
-                    self.found = True
-                    print(f"\n\n>>> КЛЮЧ НАЙДЕН! <<<")
-                    print(f"Приватный ключ: {private_key}")
-                    print(f"Hex: {hex(key)}")
-                    with open(CONFIG['FOUND_KEYS_FILE'], "w") as f:
-                        f.write(f"Адрес: {CONFIG['TARGET_ADDRESS']}\n")
-                        f.write(f"Ключ: {private_key}\n")
-                        f.write(f"Hex: {hex(key)}\n")
-                break
+            for key in range(start, end + 1):
+                if self.found:
+                    break
+                    
+                private_key = f"{key:064x}"
+                address = self.private_to_address(private_key)
+                
+                if address == CONFIG['TARGET_ADDRESS']:
+                    with self.lock:
+                        self.found = True
+                        print(f"\n\n>>> КЛЮЧ НАЙДЕН! <<<")
+                        print(f"Приватный ключ: {private_key}")
+                        print(f"Hex: {hex(key)}")
+                        with open(CONFIG['FOUND_KEYS_FILE'], "w") as f:
+                            f.write(f"Адрес: {CONFIG['TARGET_ADDRESS']}\n")
+                            f.write(f"Ключ: {private_key}\n")
+                            f.write(f"Hex: {hex(key)}\n")
+                    found_in_batch = True
+                    break
 
-            self.update_progress(key)
-
-    def get_next_key(self):
+            self.update_progress(end, (end - start + 1))
+            
+    def get_next_batch(self):
         with self.lock:
-            if self.current_key > CONFIG['END_KEY'] or self.found:
+            if self.found:
                 return None
-            key = self.current_key
-            self.current_key += 1
-            return key
+                
+            batch_start = CONFIG['START_KEY'] + self.current_batch * CONFIG['BATCH_SIZE']
+            if batch_start > CONFIG['END_KEY']:
+                return None
+                
+            batch_end = min(batch_start + CONFIG['BATCH_SIZE'] - 1, CONFIG['END_KEY'])
+            self.current_batch += 1
+            return (batch_start, batch_end)
 
-    def update_progress(self, key):
+    def update_progress(self, last_key, keys_processed):
         with self.lock:
-            self.keys_checked += 1
-            
-            # Проверяем нужно ли сохранить этот диапазон
-            current_batch = key // CONFIG['BATCH_SIZE']
-            if current_batch > self.last_saved_batch:
-                batch_start = current_batch * CONFIG['BATCH_SIZE']
-                batch_end = (current_batch + 1) * CONFIG['BATCH_SIZE'] - 1
-                self.progress['checked_ranges'].append({
-                    'start': batch_start,
-                    'end': batch_end,
-                    'keys': CONFIG['BATCH_SIZE']
-                })
-                self.last_saved_batch = current_batch
-                self.save_progress()
-
-    def format_speed(self, speed):
-        if speed >= 1_000_000:
-            return f"{speed/1_000_000:.1f}M keys/s"
-        return f"{speed/1_000:.1f}K keys/s"
+            self.keys_checked += keys_processed
+            self.progress['checked_ranges'].append({
+                'start': last_key - keys_processed + 1,
+                'end': last_key,
+                'keys': keys_processed
+            })
 
     def run(self):
         print("\n=== Bitcoin Puzzle Solver ===")
         print(f"Целевой адрес: {CONFIG['TARGET_ADDRESS']}")
         print(f"Диапазон: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
         print(f"Всего ключей: {(CONFIG['END_KEY']-CONFIG['START_KEY']+1):,}")
+        print(f"Размер блока: {CONFIG['BATCH_SIZE']:,}")
         print(f"Потоков: {CONFIG['THREADS']}")
         print("==============================")
 
@@ -137,14 +135,14 @@ class KeyScanner:
                         speed = int(self.keys_checked / elapsed) if elapsed > 0 else 0
                         total_keys = CONFIG['END_KEY'] - CONFIG['START_KEY'] + 1
                         percent = (self.keys_checked / total_keys) * 100
-                        remaining = (total_keys - self.keys_checked) / speed if speed > 0 else 0
                         
                         print(f"\r[Прогресс] {percent:.2f}% | "
                               f"Ключей: {self.keys_checked:,} | "
-                              f"Скорость: {self.format_speed(speed)} | "
-                              f"Текущий: {hex(self.current_key)}", end="", flush=True)
+                              f"Скорость: {speed:,} keys/s | "
+                              f"Блоков: {self.current_batch}", end="", flush=True)
                     
                     last_status = time.time()
+                    self.save_progress()
         
         except KeyboardInterrupt:
             print("\nОстановлено пользователем. Сохраняем прогресс...")
@@ -154,10 +152,11 @@ class KeyScanner:
             t.join()
 
         elapsed = time.time() - self.start_time
-        print(f"\n\nПоиск завершен. Проверено ключей: {self.keys_checked:,}")
+        print(f"\n\nИтоги:")
+        print(f"Проверено ключей: {self.keys_checked:,}")
+        print(f"Проверено блоков: {self.current_batch}")
         print(f"Общее время: {elapsed:.1f} секунд")
-        print(f"Средняя скорость: {self.format_speed(int(self.keys_checked/elapsed))}")
-        print(f"Последняя позиция: {hex(self.current_key)}")
+        print(f"Средняя скорость: {int(self.keys_checked/elapsed):,} keys/s")
         self.save_progress()
 
 if __name__ == "__main__":
