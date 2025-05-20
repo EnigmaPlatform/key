@@ -21,7 +21,7 @@ CONFIG = {
     'SAVE_INTERVAL': 10_000_000,  # Сохранять каждый 10 миллионов ключей
     'STATUS_INTERVAL': 30,         # Обновлять статус каждые 30 секунд
     'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
-    'START_KEY': 0x349b84b6431a4c4ef1,
+    'START_KEY': 0x349b84b6431a0c4ef1,
     'END_KEY': 0x349b84b6431a6c4ef1,
     'BATCH_PER_CORE': 1_000_000    # Количество ключей на ядро за одну итерацию
 }
