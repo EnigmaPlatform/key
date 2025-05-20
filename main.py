@@ -5,7 +5,7 @@ import json
 import os
 import multiprocessing
 import coincurve
-from typing import Optional
+from typing import Optional, List
 from functools import lru_cache
 
 class Colors:
@@ -19,11 +19,11 @@ CONFIG = {
     'CHECKPOINT_FILE': "checkpoint.json",
     'FOUND_KEYS_FILE': "found_keys.txt",
     'SAVE_INTERVAL': 10_000_000,  # Сохранять каждый 10 миллионов ключей
-    'STATUS_INTERVAL': 10,        # Обновлять статус каждые 10 секунд
-    'BATCH_SIZE': 100_000,        # Размер пакета для обработки
+    'STATUS_INTERVAL': 30,         # Обновлять статус каждые 30 секунд
     'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
     'START_KEY': 0x349b84b6431a4c4ef1,
-    'END_KEY': 0x349b84b6431a6c4ef1
+    'END_KEY': 0x349b84b6431a6c4ef1,
+    'BATCH_PER_CORE': 1_000_000    # Количество ключей на ядро за одну итерацию
 }
 
 def load_checkpoint() -> int:
@@ -66,72 +66,93 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         print(f"{Colors.RED}Error generating address: {e}{Colors.END}")
         return None
 
-def process_range(start_key: int, end_key: int, target: str) -> Optional[str]:
-    current_key = start_key
-    last_save_key = start_key
-    last_status_time = time.time()
-    keys_processed = 0
-    start_time = time.time()
-    
-    while current_key <= end_key:
-        batch = []
-        batch_end = min(current_key + CONFIG['BATCH_SIZE'] - 1, end_key)
-        
-        # Генерируем пакет ключей
-        for k in range(current_key, batch_end + 1):
-            private_key = f"{k:064x}"
-            address = private_to_address(private_key)
-            
-            if address == target:
-                return private_key
-            
-            keys_processed += 1
-            
-            # Сохранение прогресса
-            if k - last_save_key >= CONFIG['SAVE_INTERVAL']:
-                save_checkpoint(k)
-                last_save_key = k
-            
-            # Вывод статуса
-            if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
-                elapsed = time.time() - start_time
-                keys_per_sec = keys_processed / elapsed if elapsed > 0 else 0
-                print(f"{Colors.YELLOW}[Status] Keys: {keys_processed:,} | Speed: {keys_per_sec:,.0f} keys/sec | Current: {hex(k)}{Colors.END}")
-                last_status_time = time.time()
-                keys_processed = 0
-                start_time = time.time()
-        
-        current_key = batch_end + 1
-    
-    save_checkpoint(end_key)
+def process_keys(key_range: range, target: str) -> Optional[str]:
+    for k in key_range:
+        private_key = f"{k:064x}"
+        if private_to_address(private_key) == target:
+            return private_key
     return None
 
 def main():
     print(f"{Colors.YELLOW}Target address: {CONFIG['TARGET_ADDRESS']}{Colors.END}")
     print(f"Search range: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
     
-    start_key = load_checkpoint()
-    if start_key > CONFIG['START_KEY']:
-        print(f"{Colors.BLUE}Resuming from checkpoint: {hex(start_key)}{Colors.END}")
+    current_key = load_checkpoint()
+    if current_key > CONFIG['START_KEY']:
+        print(f"{Colors.BLUE}Resuming from checkpoint: {hex(current_key)}{Colors.END}")
+    
+    num_cores = multiprocessing.cpu_count()
+    print(f"{Colors.BLUE}Using {num_cores} CPU cores{Colors.END}")
+    
+    manager = multiprocessing.Manager()
+    found_key = manager.Value('c', '')
+    last_status_time = time.time()
+    start_time = time.time()
+    total_checked = 0
+    batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
     
     try:
-        found_key = process_range(start_key, CONFIG['END_KEY'], CONFIG['TARGET_ADDRESS'])
-        
-        if found_key:
-            print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
-            print(f"Private key: {found_key}")
-            with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
-                f.write(f"{time.ctime()}\n")
-                f.write(f"Private: {found_key}\n")
-                f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
-        else:
-            print(f"\n{Colors.BLUE}COMPLETE: Entire range has been checked.{Colors.END}")
-            print(f"{Colors.YELLOW}The target key was not found in the specified range.{Colors.END}")
+        with multiprocessing.Pool(processes=num_cores) as pool:
+            while current_key <= CONFIG['END_KEY'] and not found_key.value:
+                batch_end = min(current_key + batch_size - 1, CONFIG['END_KEY'])
+                
+                # Разделяем работу между ядрами
+                ranges = []
+                keys_per_core = (batch_end - current_key + 1) // num_cores
+                for i in range(num_cores):
+                    start = current_key + i * keys_per_core
+                    end = start + keys_per_core - 1 if i < num_cores - 1 else batch_end
+                    ranges.append(range(start, end + 1))
+                
+                # Параллельная обработка
+                results = [pool.apply_async(process_keys, (r, CONFIG['TARGET_ADDRESS'])) for r in ranges]
+                
+                # Проверяем результаты
+                for res in results:
+                    if key := res.get():
+                        found_key.value = key
+                        break
+                
+                # Обновляем статус
+                total_checked += batch_end - current_key + 1
+                current_key = batch_end + 1
+                
+                if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
+                    elapsed = time.time() - start_time
+                    keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
+                    print(f"{Colors.YELLOW}[Status] Keys: {total_checked:,} | Speed: {keys_per_sec:,.0f} keys/sec | Current: {hex(current_key)}{Colors.END}")
+                    last_status_time = time.time()
+                
+                # Сохраняем прогресс
+                if current_key % CONFIG['SAVE_INTERVAL'] == 0:
+                    save_checkpoint(current_key)
             
+            # Финализация
+            if found_key.value:
+                print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
+                print(f"Private key: {found_key.value}")
+                with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
+                    f.write(f"{time.ctime()}\n")
+                    f.write(f"Private: {found_key.value}\n")
+                    f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
+            else:
+                print(f"\n{Colors.BLUE}COMPLETE: Entire range has been checked.{Colors.END}")
+                print(f"{Colors.YELLOW}The target key was not found in the specified range.{Colors.END}")
+                
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Interrupted by user{Colors.END}")
+        save_checkpoint(current_key)
     except Exception as e:
         print(f"\n{Colors.RED}Error: {e}{Colors.END}")
+    finally:
+        elapsed = time.time() - start_time
+        keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
+        print(f"\n{Colors.BLUE}=== FINAL STATS ===")
+        print(f"Total keys checked: {total_checked:,}")
+        print(f"Total time: {elapsed:.2f} seconds")
+        print(f"Average speed: {keys_per_sec:,.0f} keys/sec")
+        print(f"Last checked key: {hex(current_key)}")
+        print(f"=================={Colors.END}")
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
