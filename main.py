@@ -4,149 +4,162 @@ import time
 import json
 import os
 import coincurve
-from multiprocessing import Pool, cpu_count, Manager
+from multiprocessing import Pool, cpu_count, Manager, Value
 import signal
+from functools import partial
 
 # Конфигурация
 CONFIG = {
-    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
-    'START_KEY': 0x349b84b6431a5c4ef1,
-    'END_KEY': 0x349b84b6431a6c4ef1,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
-    'BATCH_SIZE': 10_000_000,  # Размер блока для каждого процесса
-    'PROCESSES': cpu_count(),  # Используем все ядра
+    'BATCH_SIZE': 10_000_000,  # Увеличенный размер блока
+    'PROCESSES': cpu_count(),  # Автоматическое определение ядер
     'STATUS_INTERVAL': 5  # Интервал обновления статуса
 }
 
 def init_worker():
-    """Игнорируем Ctrl+C в рабочих процессах"""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-def load_progress():
-    """Загружаем последний сохраненный прогресс"""
-    if os.path.exists(CONFIG['CHECKPOINT_FILE']):
+def load_progress(target_address):
+    progress_file = f'progress_{target_address}.json'
+    if os.path.exists(progress_file):
         try:
-            with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
+            with open(progress_file, 'r') as f:
                 return json.load(f)
         except:
             pass
-    return {'last_key': CONFIG['START_KEY'], 'checked_ranges': []}
+    return None
 
-def save_progress(progress):
-    """Сохраняем прогресс"""
-    with open(CONFIG['CHECKPOINT_FILE'], 'w') as f:
-        json.dump(progress, f)
+def save_progress(target_address, current_key):
+    progress_file = f'progress_{target_address}.json'
+    with open(progress_file, 'w') as f:
+        json.dump({'last_key': current_key, 'timestamp': time.time()}, f)
 
 def private_to_address(private_key_hex):
-    """Оптимизированное преобразование ключа в адрес"""
-    priv = bytes.fromhex(private_key_hex)
-    pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
-    h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
-    extended = b'\x00' + h160
-    checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
-    return base58.b58encode(extended + checksum).decode('utf-8')
+    try:
+        priv = bytes.fromhex(private_key_hex)
+        pub = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
+        h160 = hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
+        extended = b'\x00' + h160
+        checksum = hashlib.sha256(hashlib.sha256(extended).digest()).digest()[:4]
+        return base58.b58encode(extended + checksum).decode('utf-8')
+    except:
+        return None
 
-def process_batch(args):
-    """Обрабатывает пакет ключей"""
-    start_key, end_key, found_flag = args
+def process_range(args, target_address, found_flag):
+    start, end = args
     results = []
     
-    for key in range(start_key, end_key + 1):
+    for key in range(start, end + 1):
         if found_flag.value:
-            break
+            return (False, 0)
             
         private_key = f"{key:064x}"
         address = private_to_address(private_key)
         
-        if address == CONFIG['TARGET_ADDRESS']:
+        if address == target_address:
+            found_flag.value = True
             return (True, key, private_key)
     
-    return (False, end_key, end_key - start_key + 1)
+    return (False, end - start + 1)
 
-def main():
-    progress = load_progress()
-    current_key = progress['last_key']
+def generate_batches(start, end, batch_size, processes):
+    total_keys = end - start + 1
+    batch_size = min(batch_size, total_keys // processes)
+    batches = []
+    
+    for i in range(0, total_keys, batch_size):
+        batch_start = start + i
+        batch_end = min(batch_start + batch_size - 1, end)
+        batches.append((batch_start, batch_end))
+    
+    return batches
+
+def main(target_address, start_key, end_key):
+    # Инициализация
+    progress = load_progress(target_address)
+    current_key = progress['last_key'] if progress else start_key
+    
     manager = Manager()
     found_flag = manager.Value('b', False)
+    total_keys_processed = manager.Value('i', 0)
+    start_time = last_status_time = time.time()
     
     print("\n=== Bitcoin Puzzle Solver ===")
-    print(f"Целевой адрес: {CONFIG['TARGET_ADDRESS']}")
-    print(f"Диапазон: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
-    print(f"Всего ключей: {(CONFIG['END_KEY']-CONFIG['START_KEY']+1):,}")
-    print(f"Размер блока: {CONFIG['BATCH_SIZE']:,}")
+    print(f"Целевой адрес: {target_address}")
+    print(f"Диапазон: {hex(start_key)} - {hex(end_key)}")
+    print(f"Всего ключей: {(end_key-start_key+1):,}")
     print(f"Процессов: {CONFIG['PROCESSES']}")
     print("==============================")
 
-    start_time = last_status_time = time.time()
-    total_keys_processed = current_key - CONFIG['START_KEY']
-    
     try:
         with Pool(processes=CONFIG['PROCESSES'], initializer=init_worker) as pool:
-            while current_key <= CONFIG['END_KEY'] and not found_flag.value:
-                # Подготавливаем задания
-                batch_end = min(current_key + CONFIG['BATCH_SIZE'] - 1, CONFIG['END_KEY'])
-                batch_size_per_process = (batch_end - current_key + 1) // CONFIG['PROCESSES']
-                
-                batch_args = []
-                for i in range(CONFIG['PROCESSES']):
-                    start = current_key + i * batch_size_per_process
-                    end = start + batch_size_per_process - 1 if i < CONFIG['PROCESSES'] - 1 else batch_end
-                    batch_args.append((start, end, found_flag))
-                
+            # Генерация батчей
+            batches = generate_batches(current_key, end_key, CONFIG['BATCH_SIZE'], CONFIG['PROCESSES'])
+            
+            # Частичная функция для передачи дополнительных аргументов
+            worker_func = partial(process_range, target_address=target_address, found_flag=found_flag)
+            
+            for batch in batches:
+                if found_flag.value:
+                    break
+                    
                 # Параллельная обработка
-                results = pool.map(process_batch, batch_args)
+                results = pool.map(worker_func, [batch])
                 
-                # Обработка результатов
                 for result in results:
-                    found, last_key, keys_processed = result
-                    total_keys_processed += keys_processed
+                    found, *data = result
                     
                     if found:
-                        found_flag.value = True
+                        key, private_key = data
                         print(f"\n\n>>> КЛЮЧ НАЙДЕН! <<<")
-                        print(f"Приватный ключ: {result[2]}")
-                        print(f"Hex: {hex(result[1])}")
+                        print(f"Приватный ключ: {private_key}")
+                        print(f"Hex: {hex(key)}")
                         with open(CONFIG['FOUND_KEYS_FILE'], "w") as f:
-                            f.write(f"Адрес: {CONFIG['TARGET_ADDRESS']}\n")
-                            f.write(f"Ключ: {result[2]}\n")
-                            f.write(f"Hex: {hex(result[1])}\n")
+                            f.write(f"Адрес: {target_address}\n")
+                            f.write(f"Ключ: {private_key}\n")
+                            f.write(f"Hex: {hex(key)}\n")
                         return
-                    
-                    current_key = max(current_key, last_key + 1)
+                    else:
+                        keys_processed = data[0]
+                        total_keys_processed.value += keys_processed
+                        current_key = batch[1] + 1
                 
-                # Сохранение прогресса
-                progress['last_key'] = current_key
-                progress['checked_ranges'].append({
-                    'start': batch_args[0][0],
-                    'end': batch_args[-1][1],
-                    'keys': batch_end - batch_args[0][0] + 1
-                })
-                
-                # Вывод статуса (общая статистика по всем процессам)
+                # Вывод статуса
                 if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
                     elapsed = time.time() - start_time
-                    speed = int(total_keys_processed / elapsed)
-                    total_keys = CONFIG['END_KEY'] - CONFIG['START_KEY'] + 1
-                    percent = (total_keys_processed / total_keys) * 100
+                    speed = int(total_keys_processed.value / elapsed)
+                    total_keys = end_key - start_key + 1
+                    percent = (total_keys_processed.value / total_keys) * 100
                     
                     print(f"\r[Прогресс] {percent:.2f}% | "
-                          f"Ключей: {total_keys_processed:,} | "
+                          f"Ключей: {total_keys_processed.value:,} | "
                           f"Скорость: {speed:,} keys/s | "
                           f"Текущий: {hex(current_key)}", end="", flush=True)
                     
                     last_status_time = time.time()
-                    save_progress(progress)
+                    save_progress(target_address, current_key)
     
     except KeyboardInterrupt:
         print("\nОстановлено пользователем. Сохраняем прогресс...")
     
     # Финализация
     elapsed = time.time() - start_time
-    print(f"\n\nПоиск завершен. Проверено ключей: {total_keys_processed:,}")
+    print(f"\n\nПоиск завершен. Проверено ключей: {total_keys_processed.value:,}")
     print(f"Общее время: {elapsed:.1f} секунд")
-    print(f"Средняя скорость: {int(total_keys_processed/elapsed):,} keys/s")
-    save_progress(progress)
+    print(f"Средняя скорость: {int(total_keys_processed.value/elapsed):,} keys/s")
+    save_progress(target_address, current_key)
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    if len(sys.argv) < 4:
+        print("Использование: python script.py <адрес> <начальный_ключ> <конечный_ключ>")
+        print("Пример: python script.py 1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU 0x1A12F1DA9D7000000 0x1A12F1DA9DFFFFFFF")
+        sys.exit(1)
+    
+    target_address = sys.argv[1]
+    start_key = int(sys.argv[2], 16)
+    end_key = int(sys.argv[3], 16)
+    
+    main(target_address, start_key, end_key)
