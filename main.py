@@ -20,9 +20,9 @@ CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 300,  # 5 минут = 300 секунд
-    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-    'START_KEY': 0x74BB02D5A1ED8E42C,
-    'END_KEY': 0x74BB02D5A1ED9FFFF,
+    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
+    'START_KEY': 0x349b84b6431a5c4ef1,
+    'END_KEY': 0x349b84b6431a6c4ef1,
     'BATCH_PER_CORE': 5_000_000  # Увеличенный размер пакета
 }
 
