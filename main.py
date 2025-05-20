@@ -9,9 +9,9 @@ import signal
 
 # Конфигурация
 CONFIG = {
-    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-    'START_KEY': 0x1A12F1DA9D7000000,
-    'END_KEY': 0x1A12F1DA9DFFFFFFF,
+    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
+    'START_KEY': 0x349b84b6431a5c4ef1,
+    'END_KEY': 0x349b84b6431a6c4ef1,
     'CHECKPOINT_FILE': 'progress.json',
     'FOUND_KEYS_FILE': 'found_key.txt',
     'BATCH_SIZE': 1_000_000,  # Размер блока для каждого процесса
