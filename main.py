@@ -122,7 +122,7 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         ripemd160.update(sha256_hash)
         
         versioned_payload = b'\x00' + ripemd160.digest()
-        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest()[:4]
+        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest())[:4]
         
         return base58.b58encode(versioned_payload + checksum).decode('utf-8')
     except Exception:
