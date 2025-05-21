@@ -7,7 +7,6 @@ import multiprocessing
 import coincurve
 import signal
 from typing import Optional
-from functools import lru_cache
 
 class Colors:
     GREEN = '\033[92m'
@@ -21,41 +20,37 @@ CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
-    'TARGET_ADDRESS': "19YZECXj3SxEZMoUeJ1yiPsw8xANe7M7QR",
-    'START_KEY': 0x349b84b6031a666666,
-    'END_KEY': 0x349b84b6431a6cffff,
+    'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
+    'START_KEY': 0x600000000000000000,
+    'END_KEY': 0x7fffffffffffffffff,
     'BATCH_PER_CORE': 10_000_000,
     'MAX_RETRIES': 3
 }
 
-def init_shared_stats(s):
-    global shared_stats
+def init_shared_stats(s, l):
+    global shared_stats, stats_lock
     shared_stats = s
+    stats_lock = l
 
 def is_junk_key(key_hex: str) -> bool:
-    """Быстрая проверка на невалидные ключи (оптимизированная для ведущих нулей)"""
-    significant_part = key_hex[-18:]  # Анализируем только последние 18 символов
+    """Улучшенная проверка на невалидные ключи"""
+    key_hex = key_hex.lstrip('0') or '0'
     
-    # 1. Длинные последовательности (5+ одинаковых символов)
+    # 1. Длинные последовательности (6+ одинаковых символа)
     for c in '0123456789abcdef':
-        if c*5 in significant_part:
+        if c*6 in key_hex:
             return True
     
     # 2. Простые последовательности
     simple_seqs = {
-        '01234', '12345', '23456', '34567', '45678', '56789',
-        '6789a', '789ab', '89abc', '9abcd', 'abcde', 'bcdef',
-        '54321', '65432', '76543', '87654', '98765', 'a9876',
-        'ba987', 'cba98', 'dcba9', 'edcba'
+        '012345', '123456', '234567', '345678', '456789', '56789a',
+        '6789ab', '789abc', '89abcd', '9abcde', 'abcdef',
+        '543210', '654321', '765432', '876543', '987654', 'a98765',
+        'ba9876', 'cba987', 'dcba98', 'edcba9', 'fedcba'
     }
-    for seq in simple_seqs:
-        if seq in significant_part:
-            return True
     
-    # 3. Повторяющиеся группы (3+ повторения по 2 символа)
-    for i in range(len(significant_part)-6):
-        chunk = significant_part[i:i+2]
-        if significant_part[i+2:i+4] == chunk and significant_part[i+4:i+6] == chunk:
+    for seq in simple_seqs:
+        if seq in key_hex:
             return True
     
     return False
@@ -79,8 +74,8 @@ def load_checkpoint() -> int:
                     return CONFIG['START_KEY']
                     
                 return last_key + 1
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"{Colors.RED}Checkpoint corrupted, attempt {_+1}/{CONFIG['MAX_RETRIES']}: {e}{Colors.END}")
+        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            print(f"{Colors.RED}Checkpoint error, attempt {_+1}/{CONFIG['MAX_RETRIES']}: {e}{Colors.END}")
             time.sleep(1)
     
     print(f"{Colors.RED}Fatal: Could not load checkpoint, resetting to start{Colors.END}")
@@ -100,7 +95,7 @@ def atomic_save_checkpoint(current_key: int, stats):
                         'keys_found': stats['keys_found'],
                         'keys_skipped': stats['keys_skipped']
                     }
-                }, f)
+                }, f, indent=2)
             
             os.replace(temp_file, CONFIG['CHECKPOINT_FILE'])
             return
@@ -110,10 +105,12 @@ def atomic_save_checkpoint(current_key: int, stats):
     
     print(f"{Colors.RED}Fatal: Could not save checkpoint{Colors.END}")
 
-@lru_cache(maxsize=2_000_000)
 def private_to_address(private_key_hex: str) -> Optional[str]:
     """Конвертация приватного ключа в Bitcoin-адрес"""
     try:
+        if len(private_key_hex) != 64:
+            return None
+            
         priv = bytes.fromhex(private_key_hex)
         pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
         
@@ -122,38 +119,42 @@ def private_to_address(private_key_hex: str) -> Optional[str]:
         ripemd160.update(sha256_hash)
         
         versioned_payload = b'\x00' + ripemd160.digest()
-        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest())[:4]
+        checksum = hashlib.sha256(hashlib.sha256(versioned_payload).digest()).digest()[:4]
         
         return base58.b58encode(versioned_payload + checksum).decode('utf-8')
-    except Exception:
+    except Exception as e:
+        print(f"{Colors.RED}Error converting key {private_key_hex}: {e}{Colors.END}")
         return None
 
-def process_key_batch(start_key: int, end_key: int, target: str, stats):
-    """Обработка диапазона ключей с фильтрацией"""
-    local_checked = 0
-    local_skipped = 0
+def process_key_batch(start_key: int, end_key: int, target: str):
+    """Обработка диапазона ключей"""
+    local_stats = {
+        'keys_checked': 0,
+        'keys_skipped': 0,
+        'keys_found': 0
+    }
+    found_key = None
     
     for k in range(start_key, end_key + 1):
         private_key = f"{k:064x}"
         
         if is_junk_key(private_key):
-            local_skipped += 1
+            local_stats['keys_skipped'] += 1
             continue
             
-        if private_to_address(private_key) == target:
-            stats['keys_found'] += 1
-            return private_key
+        address = private_to_address(private_key)
+        local_stats['keys_checked'] += 1
         
-        local_checked += 1
-        if local_checked % 100_000 == 0:
-            stats['keys_checked'] += local_checked
-            stats['keys_skipped'] += local_skipped
-            local_checked = 0
-            local_skipped = 0
+        if address == target:
+            print(f"\n{Colors.GREEN}POTENTIAL MATCH FOUND!{Colors.END}")
+            print(f"Private key: {private_key}")
+            print(f"Calculated address: {address}")
+            print(f"Target address: {target}")
+            local_stats['keys_found'] += 1
+            found_key = private_key
+            break
     
-    stats['keys_checked'] += local_checked
-    stats['keys_skipped'] += local_skipped
-    return None
+    return local_stats, found_key
 
 class KeySearcher:
     def __init__(self):
@@ -164,39 +165,29 @@ class KeySearcher:
         signal.signal(signal.SIGTERM, self.handle_interrupt)
 
     def handle_interrupt(self, signum, frame):
-        """Обработка прерываний"""
         print(f"\n{Colors.YELLOW}Received interrupt signal, saving progress...{Colors.END}")
         self.should_stop = True
 
     def print_status(self, stats):
-        """Вывод статистики"""
         elapsed = time.time() - self.start_time
         keys_per_sec = stats['keys_checked'] / elapsed if elapsed > 0 else 0
-        
-        if keys_per_sec > 1_000_000:
-            speed_str = f"{keys_per_sec/1_000_000:.2f} M keys/sec"
-        else:
-            speed_str = f"{keys_per_sec:,.0f} keys/sec"
         
         print(
             f"{Colors.YELLOW}[Status] Keys: {stats['keys_checked']:,} | "
             f"Skipped: {stats['keys_skipped']:,} | "
-            f"Speed: {speed_str} | "
+            f"Speed: {self.format_speed(keys_per_sec)} | "
             f"Current: {hex(self.current_key)} | "
-            f"Elapsed: {elapsed/60:.1f} min{Colors.END}"
+            f"Elapsed: {elapsed/3600:.2f} hours{Colors.END}"
         )
 
     def run(self):
         print(f"{Colors.YELLOW}Target address: {CONFIG['TARGET_ADDRESS']}{Colors.END}")
         print(f"Search range: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
-        print(f"{Colors.BLUE}Filtering obvious junk keys (sequences/repeats){Colors.END}")
+        print(f"Starting from: {hex(self.current_key)}")
+        print(f"{Colors.BLUE}Filtering junk keys (sequences/repeats){Colors.END}")
         
-        if self.current_key > CONFIG['START_KEY']:
-            print(f"{Colors.BLUE}Resuming from checkpoint: {hex(self.current_key)}{Colors.END}")
-        
-        num_cores = multiprocessing.cpu_count()
+        num_cores = max(1, multiprocessing.cpu_count())
         print(f"{Colors.BLUE}Using {num_cores} CPU cores{Colors.END}")
-        print(f"{Colors.YELLOW}Status updates every minute{Colors.END}\n")
         
         manager = multiprocessing.Manager()
         shared_stats = manager.dict({
@@ -204,39 +195,62 @@ class KeySearcher:
             'keys_found': 0,
             'keys_skipped': 0
         })
+        stats_lock = manager.Lock()
         
-        pool = multiprocessing.Pool(processes=num_cores, initializer=init_shared_stats, initargs=(shared_stats,))
+        pool = multiprocessing.Pool(
+            processes=num_cores,
+            initializer=init_shared_stats,
+            initargs=(shared_stats, stats_lock)
+        )
+        
         last_status_time = time.time()
+        last_save_time = time.time()
         found_key = None
-        batch_size = CONFIG['BATCH_PER_CORE'] * num_cores * 2
 
         try:
             while self.current_key <= CONFIG['END_KEY'] and not found_key and not self.should_stop:
+                # Динамический размер батча
+                batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
                 batch_end = min(self.current_key + batch_size - 1, CONFIG['END_KEY'])
                 
-                keys_per_core = (batch_end - self.current_key + 1) // num_cores
+                # Создаем задачи для каждого ядра
                 tasks = []
+                keys_per_core = max(1, (batch_end - self.current_key + 1) // num_cores)
+                
                 for i in range(num_cores):
                     start = self.current_key + i * keys_per_core
                     end = start + keys_per_core - 1 if i < num_cores - 1 else batch_end
-                    tasks.append((start, end, CONFIG['TARGET_ADDRESS'], shared_stats))
+                    if start > end:
+                        continue
+                    tasks.append((start, end, CONFIG['TARGET_ADDRESS']))
                 
+                # Параллельная обработка
                 results = pool.starmap(process_key_batch, tasks)
                 
-                for result in results:
+                # Обработка результатов
+                for local_stats, result in results:
+                    with stats_lock:
+                        shared_stats['keys_checked'] += local_stats['keys_checked']
+                        shared_stats['keys_skipped'] += local_stats['keys_skipped']
+                        shared_stats['keys_found'] += local_stats['keys_found']
+                    
                     if result:
                         found_key = result
                         break
                 
                 self.current_key = batch_end + 1
                 
-                if shared_stats['keys_checked'] % CONFIG['SAVE_INTERVAL'] == 0:
-                    atomic_save_checkpoint(self.current_key - 1, shared_stats)
-                
-                if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
+                # Периодическое сохранение и вывод статистики
+                current_time = time.time()
+                if current_time - last_status_time >= CONFIG['STATUS_INTERVAL']:
                     self.print_status(shared_stats)
-                    last_status_time = time.time()
+                    last_status_time = current_time
+                
+                if current_time - last_save_time >= 300:  # Сохраняем каждые 5 минут
+                    atomic_save_checkpoint(self.current_key - 1, shared_stats)
+                    last_save_time = current_time
             
+            # Обработка результатов поиска
             if found_key:
                 print(f"\n{Colors.GREEN}SUCCESS: Key found!{Colors.END}")
                 print(f"Private key: {found_key}")
@@ -245,20 +259,20 @@ class KeySearcher:
                     f.write(f"Private: {found_key}\n")
                     f.write(f"Address: {CONFIG['TARGET_ADDRESS']}\n\n")
             elif self.should_stop:
-                print(f"\n{Colors.YELLOW}SEARCH STOPPED{Colors.END}")
+                print(f"\n{Colors.YELLOW}SEARCH STOPPED BY USER{Colors.END}")
             else:
                 print(f"\n{Colors.BLUE}SEARCH COMPLETED{Colors.END}")
                 print(f"{Colors.YELLOW}Target key not found in specified range{Colors.END}")
                 
         except Exception as e:
-            print(f"\n{Colors.RED}Error: {e}{Colors.END}")
+            print(f"\n{Colors.RED}Critical error: {e}{Colors.END}")
+            raise
         finally:
             pool.close()
             pool.join()
+            atomic_save_checkpoint(self.current_key - 1, shared_stats)
             
-            if not found_key and self.current_key > CONFIG['START_KEY']:
-                atomic_save_checkpoint(self.current_key - 1, shared_stats)
-            
+            # Финальная статистика
             elapsed = time.time() - self.start_time
             total_checked = shared_stats['keys_checked']
             keys_per_sec = total_checked / elapsed if elapsed > 0 else 0
@@ -272,9 +286,10 @@ class KeySearcher:
             print(f"=================={Colors.END}")
 
     def format_speed(self, speed: float) -> str:
-        """Форматирование скорости"""
         if speed >= 1_000_000:
             return f"{speed/1_000_000:.2f} M keys/sec"
+        elif speed >= 1_000:
+            return f"{speed/1_000:.1f} K keys/sec"
         return f"{speed:,.0f} keys/sec"
 
 if __name__ == "__main__":
