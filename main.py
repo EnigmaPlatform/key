@@ -21,9 +21,9 @@ CONFIG = {
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 300,  # 5 минут = 300 секунд
     'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
-    'START_KEY': 0x6a73428b1350000000,
-    'END_KEY': 0x6a73428b135fffffff,
-    'BATCH_PER_CORE': 5_000_000  # Увеличенный размер пакета
+    'START_KEY': 0x600000000000000000,
+    'END_KEY': 0x7fffffffffffffffff,
+    'BATCH_PER_CORE': 10_000_000  # Увеличенный размер пакета
 }
 
 def load_checkpoint() -> int:
