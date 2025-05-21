@@ -23,7 +23,7 @@ CONFIG = {
     'TARGET_ADDRESS': "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU",
     'START_KEY': 0x600000000000000000,
     'END_KEY': 0x7fffffffffffffffff,
-    'BATCH_PER_CORE': 10_000_000  # Увеличенный размер пакета
+    'BATCH_PER_CORE': 5_000_000  # Увеличенный размер пакета
 }
 
 def load_checkpoint() -> int:
