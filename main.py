@@ -5,6 +5,7 @@ import os
 import multiprocessing
 import coincurve
 import signal
+import math
 from typing import Optional
 
 class Colors:
@@ -19,25 +20,67 @@ CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
-    'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),  # Замените на ваш хеш
+    'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'START_KEY': 0x60102a304a78f26a80,
     'END_KEY': 0x7fffffffffffffffff,
     'BATCH_PER_CORE': 10_000_000,
-    'MAX_RETRIES': 3
+    'MAX_RETRIES': 3,
+    'MIN_ENTROPY': 2.0
 }
 
 def init_shared_stats(s):
     global shared_stats
     shared_stats = s
 
+def calculate_entropy(s: str) -> float:
+    """Вычисляет энтропию строки в битах на символ."""
+    freq = {}
+    for char in s:
+        freq[char] = freq.get(char, 0) + 1
+    entropy = -sum((f / len(s)) * math.log2(f / len(s)) for f in freq.values())
+    return entropy
+
 def is_junk_key(key_hex: str) -> bool:
-    significant_part = key_hex[-18:]
+    """Проверяет ключ на наличие нежелательных паттернов."""
+    significant_part = key_hex.lstrip('0')[-18:]  # Берем значимую часть без ведущих нулей
+    
+    # 1. Проверка на длинные повторяющиеся последовательности
     for c in '0123456789abcdef':
-        if c*5 in significant_part:
+        if c*4 in significant_part:
             return True
+    
+    # 2. Проверка на тривиальные последовательности
+    trivial_sequences = [
+        '0123', '1234', '2345', '3456', '4567', '5678', '6789',
+        '89ab', '9abc', 'abcd', 'bcde', 'cdef', 'def0', '0000',
+        '1111', '2222', '3333', '4444', '5555', '6666', '7777',
+        '8888', '9999', 'aaaa', 'bbbb', 'cccc', 'dddd', 'eeee', 'ffff'
+    ]
+    for seq in trivial_sequences:
+        if seq in significant_part:
+            return True
+    
+    # 3. Проверка на низкую энтропию
+    last_16 = significant_part[-16:] if len(significant_part) >= 16 else significant_part
+    if len(last_16) >= 8 and calculate_entropy(last_16) < CONFIG['MIN_ENTROPY']:
+        return True
+    
+    # 4. Проверка на "мемные" значения
+    meme_values = ['dead', 'beef', 'cafe', 'face', 'bad', 'feed', 'ace', 'add']
+    for meme in meme_values:
+        if meme in significant_part:
+            return True
+    
+    # 5. Проверка на слишком простые ключи
+    hex_digits = set(significant_part.lower())
+    if (hex_digits.issubset(set('01234567')) or 
+        hex_digits.issubset(set('89abcdef'))):
+        return True
+    
     return False
 
 def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
+    """Конвертирует приватный ключ в RIPEMD-160 хеш адреса."""
     try:
         priv = bytes.fromhex(private_key_hex)
         pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
@@ -48,6 +91,7 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
         return None
 
 def load_checkpoint() -> int:
+    """Загружает последнюю позицию из файла чекпоинта."""
     if not os.path.exists(CONFIG['CHECKPOINT_FILE']):
         return CONFIG['START_KEY']
     
@@ -73,6 +117,7 @@ def load_checkpoint() -> int:
     return CONFIG['START_KEY']
 
 def atomic_save_checkpoint(current_key: int, stats):
+    """Атомарно сохраняет текущую позицию в файл."""
     temp_file = f"{CONFIG['CHECKPOINT_FILE']}.{os.getpid()}.tmp"
     for _ in range(CONFIG['MAX_RETRIES']):
         try:
@@ -96,6 +141,7 @@ def atomic_save_checkpoint(current_key: int, stats):
     print(f"{Colors.RED}Fatal: Could not save checkpoint{Colors.END}")
 
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
+    """Обрабатывает пакет ключей в одном процессе."""
     local_checked = 0
     local_skipped = 0
     
@@ -134,6 +180,7 @@ class KeySearcher:
         self.should_stop = True
 
     def print_status(self, stats):
+        """Выводит текущий статус поиска."""
         elapsed = time.time() - self.start_time
         keys_per_sec = stats['keys_checked'] / elapsed if elapsed > 0 else 0
         
@@ -150,10 +197,22 @@ class KeySearcher:
             f"Elapsed: {elapsed/60:.1f} min{Colors.END}"
         )
 
+    def format_speed(self, speed: float) -> str:
+        """Форматирует скорость перебора."""
+        if speed >= 1_000_000:
+            return f"{speed/1_000_000:.2f} M keys/sec"
+        return f"{speed:,.0f} keys/sec"
+
     def run(self):
+        """Основной цикл поиска ключей."""
         print(f"{Colors.YELLOW}Target RIPEMD-160: {CONFIG['TARGET_RIPEMD'].hex()}{Colors.END}")
         print(f"Search range: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
-        print(f"{Colors.BLUE}Filtering obvious junk keys (sequences/repeats){Colors.END}")
+        print(f"{Colors.BLUE}Filtering junk keys with advanced patterns:{Colors.END}")
+        print(f" - Repeating sequences (4+ chars)")
+        print(f" - Trivial sequences (1234, abcd)")
+        print(f" - Low entropy patterns")
+        print(f" - Meme values (dead, beef)")
+        print(f" - Simple hex ranges (only 0-7 or 8-f)")
         
         if self.current_key > CONFIG['START_KEY']:
             print(f"{Colors.BLUE}Resuming from checkpoint: {hex(self.current_key)}{Colors.END}")
@@ -234,11 +293,6 @@ class KeySearcher:
             print(f"Average speed: {self.format_speed(keys_per_sec)}")
             print(f"Last checked key: {hex(self.current_key)}")
             print(f"=================={Colors.END}")
-
-    def format_speed(self, speed: float) -> str:
-        if speed >= 1_000_000:
-            return f"{speed/1_000_000:.2f} M keys/sec"
-        return f"{speed:,.0f} keys/sec"
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
