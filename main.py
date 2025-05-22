@@ -11,10 +11,10 @@ from functools import lru_cache
 # Конфигурация
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")  # Замените на нужный хеш
-    START = 0x349b84b643115c4ef1 # Начальный ключ (рекомендуемый для Puzzle)
-    END = 0x349b84b6431a6c4ef1   # Конечный ключ
-    BATCH = 2_000           # Размер батча на ядро
+    TARGET = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")  # Замените на нужный хеш
+    START = 0x60102a304e0c796a80 # Начальный ключ (рекомендуемый для Puzzle)
+    END = 0x7fffffffffffffffff  # Конечный ключ
+    BATCH = 5_000_000           # Размер батча на ядро
     UPDATE = 1_000_000          # Обновление статуса
 
 # Быстрые проверки ключей
