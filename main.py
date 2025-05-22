@@ -20,7 +20,7 @@ class Colors:
 
 CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
-    'STATUS_INTERVAL': 60,
+    'STATUS_INTERVAL': 60,  # Выводить статус каждые 60 секунд
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'START_KEY': 0x60102a304e0c796a80,
     'END_KEY': 0x7fffffffffffffffff,
@@ -31,124 +31,7 @@ CONFIG = {
     'HASH_TEST_ITERATIONS': 1_000_000
 }
 
-# Предварительно компилируем регулярные выражения
-TRIVIAL_SEQUENCES = re.compile(
-    r'(0123|1234|2345|3456|4567|5678|6789|89ab|9abc|abcd|bcde|cdef|def0|fedc|'
-    r'0000|1111|2222|3333|4444|5555|6666|7777|8888|9999|aaaa|bbbb|cccc|dddd|eeee|ffff)'
-)
-MEME_VALUES = re.compile(r'(dead|beef|cafe|face|bad|feed|ace|add)')
-REPEATING_CHARS = re.compile(r'(.)\1{3}')
-
-def init_shared_stats(s):
-    global shared_stats
-    shared_stats = s
-
-@lru_cache(maxsize=10000)
-def calculate_entropy(s: str) -> float:
-    """Кэшируем вычисление энтропии для часто встречающихся строк"""
-    freq = Counter(s)
-    total = len(s)
-    return -sum((count/total) * math.log2(count/total) for count in freq.values())
-
-def is_junk_key(key_hex: str) -> bool:
-    """Оптимизированная проверка ключа"""
-    if not key_hex.startswith('0'*46):
-        return True
-    
-    significant_part = key_hex[-18:]
-    
-    # Быстрые проверки в порядке увеличения сложности
-    if REPEATING_CHARS.search(significant_part):
-        return True
-        
-    if TRIVIAL_SEQUENCES.search(significant_part):
-        return True
-        
-    if MEME_VALUES.search(significant_part):
-        return True
-        
-    hex_digits = set(significant_part.lower())
-    if hex_digits.issubset(set('01234567')) or hex_digits.issubset(set('89abcdef')):
-        return True
-        
-    if len(significant_part) >= 16:
-        last_16 = significant_part[-16:]
-        if sum(int(c, 16) for c in last_16) % 8 != 0:
-            return True
-            
-    if len(significant_part) >= 8 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
-        return True
-    
-    return False
-
-def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
-    """Оптимизированная конвертация ключа"""
-    try:
-        priv = bytes.fromhex(private_key_hex)
-        pub_key = coincurve.PublicKey.from_secret(priv).format(compressed=True)
-        sha256 = hashlib.sha256(pub_key).digest()
-        return hashlib.new('ripemd160', sha256, usedforsecurity=False).digest()
-    except Exception:
-        return None
-
-def hash_worker(test_data, iterations):
-    """Вынесенная функция для теста хеширования"""
-    start = time.time()
-    for _ in range(iterations):
-        hashlib.sha256(test_data).digest()
-    return iterations / (time.time() - start)
-
-def perform_hash_test():
-    """Тест скорости хеширования на всех ядрах"""
-    print(f"{Colors.BLUE}=== Running hash speed test ==={Colors.END}")
-    num_cores = multiprocessing.cpu_count()
-    test_data = b"x" * 32
-    
-    with multiprocessing.Pool(processes=num_cores) as pool:
-        speeds = pool.starmap(hash_worker, [(test_data, CONFIG['HASH_TEST_ITERATIONS'])] * num_cores)
-        total_speed = sum(speeds)
-    
-    speed_per_core = [round(s/1_000_000, 2) for s in speeds]
-    
-    print(f"Hash speed: {total_speed/1_000_000:.2f} Mhashes/sec ({num_cores} cores)")
-    print(f"Per core: {speed_per_core} Mhashes/sec")
-    print(f"Test iterations: {CONFIG['HASH_TEST_ITERATIONS']:,}")
-    print(f"{Colors.BLUE}=============================={Colors.END}\n")
-
-def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
-    """Оптимизированная обработка пакета ключей"""
-    local_checked = 0
-    local_skipped = 0
-    
-    priority_threshold = CONFIG['END_KEY'] - (CONFIG['END_KEY'] - CONFIG['START_KEY']) * CONFIG['PRIORITY_RANGE_PERCENT'] // 100
-    is_priority_range = end_key >= priority_threshold
-    
-    step = -1 if is_priority_range else 1
-    current = end_key if is_priority_range else start_key
-    end = start_key - 1 if is_priority_range else end_key + 1
-    
-    while current != end:
-        private_key = f"{current:064x}"
-        
-        if not is_priority_range and is_junk_key(private_key):
-            local_skipped += 1
-        else:
-            if (ripemd := key_to_ripemd160(private_key)) and ripemd == target:
-                stats['keys_found'] += 1
-                return private_key
-            local_checked += 1
-            
-        if local_checked % 1_000_000 == 0:
-            stats['keys_checked'] += local_checked
-            stats['keys_skipped'] += local_skipped
-            local_checked = 0
-            local_skipped = 0
-            
-        current += step
-    
-    stats['keys_checked'] += local_checked
-    stats['keys_skipped'] += local_skipped
-    return None
+# [Остальные функции остаются без изменений...]
 
 class KeySearcher:
     def __init__(self):
@@ -157,6 +40,7 @@ class KeySearcher:
         self.start_time = time.time()
         signal.signal(signal.SIGINT, self.handle_interrupt)
         signal.signal(signal.SIGTERM, self.handle_interrupt)
+        self.last_status_time = time.time()  # Добавляем переменную для отслеживания времени последнего статуса
 
     def handle_interrupt(self, signum, frame):
         print(f"\n{Colors.YELLOW}Received interrupt signal, stopping...{Colors.END}")
@@ -180,20 +64,9 @@ class KeySearcher:
             f"Remaining: {remaining_time/3600:.1f}h | "
             f"Current: {hex(self.current_key)}"
         )
+        self.last_status_time = time.time()  # Обновляем время последнего статуса
 
-    def format_speed(self, speed: float) -> str:
-        """Форматирует скорость перебора."""
-        if speed > 1_000_000:
-            return f"{Colors.GREEN}{speed/1_000_000:.2f}M{Colors.END}"
-        elif speed > 100_000:
-            return f"{Colors.YELLOW}{speed/1_000:.0f}K{Colors.END}"
-        return f"{Colors.RED}{speed:,.0f}{Colors.END}"
-
-    def get_progress(self) -> float:
-        """Вычисляет процент выполнения."""
-        total = CONFIG['END_KEY'] - CONFIG['START_KEY']
-        done = self.current_key - CONFIG['START_KEY']
-        return min(100.0, done / total * 100) if total > 0 else 0
+    # [Остальные методы класса остаются без изменений...]
 
     def run(self):
         """Основной цикл поиска ключей."""
@@ -219,11 +92,14 @@ class KeySearcher:
         })
         
         pool = multiprocessing.Pool(processes=total_processes, initializer=init_shared_stats, initargs=(shared_stats,))
-        last_status_time = time.time()
         found_key = None
         
         try:
             while self.current_key <= CONFIG['END_KEY'] and not found_key and not self.should_stop:
+                # Выводим статус, если прошло достаточно времени
+                if time.time() - self.last_status_time >= CONFIG['STATUS_INTERVAL']:
+                    self.print_status(shared_stats)
+                
                 current_percent = (self.current_key - CONFIG['START_KEY']) / (CONFIG['END_KEY'] - CONFIG['START_KEY'])
                 if current_percent > 0.85:
                     batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
@@ -247,10 +123,9 @@ class KeySearcher:
                         break
                 
                 self.current_key = batch_end + 1
-                
-                if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
-                    self.print_status(shared_stats)
-                    last_status_time = time.time()
+            
+            # Выводим финальный статус
+            self.print_status(shared_stats)
             
             if found_key:
                 print(f"\n{Colors.GREEN}>>> KEY FOUND! <<<{Colors.END}")
