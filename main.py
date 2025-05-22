@@ -1,5 +1,6 @@
 import hashlib
 import time
+import os
 import multiprocessing
 import coincurve
 import signal
@@ -19,12 +20,12 @@ class Colors:
 CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
-    'START_KEY': 0x60102a304e0c796a80,
-    'END_KEY': 0x7fffffffffffffffff,
+    'START_KEY': 0x20000000000000000,
+    'END_KEY': 0x3ffffffffffffffff,
     'BATCH_PER_CORE': 1_000,
     'MIN_ENTROPY': 3.0,
     'PRIORITY_RANGE_PERCENT': 15,
-    'UPDATE_INTERVAL': 1_000
+    'UPDATE_INTERVAL': 1_000_000
 }
 
 TRIVIAL_SEQUENCES = re.compile(r'(0123|1234|2345|3456|4567|5678|6789|89ab|9abc|abcd|bcde|cdef|def0|fedc|0000|1111|2222|3333|4444|5555|6666|7777|8888|9999|aaaa|bbbb|cccc|dddd|eeee|ffff)')
@@ -70,27 +71,23 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
         return None
 
 def verify_hash_function():
-    """Проверка корректности работы хеш-функций"""
     test_key = "0000000000000000000000000000000000000000000000000000000000000001"
     expected = "751e76e8199196d454941c45d1b3a323f1433bd6"
     result = key_to_ripemd160(test_key)
     
     if not result or result.hex() != expected:
-        print(f"{Colors.RED}Hash verification failed!{Colors.END}")
-        print(f"Expected: {expected}")
-        print(f"Got: {result.hex() if result else 'None'}")
+        print(f"{Colors.RED}Ошибка проверки хеша!{Colors.END}")
+        print(f"Ожидалось: {expected}")
+        print(f"Получено: {result.hex() if result else 'None'}")
         return False
     
-    print(f"{Colors.GREEN}Hash verification passed{Colors.END}")
+    print(f"{Colors.GREEN}Проверка хеша успешна{Colors.END}")
     return True
 
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
-    local_checked = 0
-    local_skipped = 0
-    
+    local_checked = local_skipped = 0
     threshold = CONFIG['END_KEY'] - (CONFIG['END_KEY'] - CONFIG['START_KEY']) * CONFIG['PRIORITY_RANGE_PERCENT'] // 100
     is_priority = end_key >= threshold
-    
     step = -1 if is_priority else 1
     current = end_key if is_priority else start_key
     end = start_key - 1 if is_priority else end_key + 1
@@ -127,7 +124,7 @@ class KeySearcher:
         signal.signal(signal.SIGTERM, self.handle_interrupt)
 
     def handle_interrupt(self, signum, frame):
-        print(f"\n{Colors.YELLOW}Interrupt received, stopping...{Colors.END}")
+        print(f"\n{Colors.YELLOW}Получен сигнал прерывания, остановка...{Colors.END}")
         self.should_stop = True
 
     def print_status(self, stats):
@@ -136,14 +133,14 @@ class KeySearcher:
         remaining = CONFIG['END_KEY'] - self.current_key
         remaining_time = remaining / max(keys_per_sec, 1)
         
-        print(f"\n{Colors.BLUE}=== Status ===")
-        print(f"Checked: {Colors.YELLOW}{stats['keys_checked']:,}{Colors.END}")
-        print(f"Skipped: {stats['keys_skipped']:,}")
-        print(f"Speed: {self._format_speed(keys_per_sec)}/s")
-        print(f"Progress: {self._get_progress():.2f}%")
-        print(f"Elapsed: {elapsed/3600:.1f}h")
-        print(f"Remaining: {remaining_time/3600:.1f}h")
-        print(f"Current: {hex(self.current_key)}")
+        print(f"\n{Colors.BLUE}=== Статус ===")
+        print(f"Проверено: {Colors.YELLOW}{stats['keys_checked']:,}{Colors.END}")
+        print(f"Пропущено: {stats['keys_skipped']:,}")
+        print(f"Скорость: {self._format_speed(keys_per_sec)}/сек")
+        print(f"Прогресс: {self._get_progress():.2f}%")
+        print(f"Прошло: {elapsed/3600:.1f} ч")
+        print(f"Осталось: {remaining_time/3600:.1f} ч")
+        print(f"Текущий ключ: {hex(self.current_key)}")
         print(f"============={Colors.END}\n")
 
     def _format_speed(self, speed):
@@ -158,14 +155,14 @@ class KeySearcher:
 
     def run(self):
         print(f"{Colors.BLUE}=== Bitcoin Puzzle Solver ==={Colors.END}")
-        print(f"Target: {Colors.YELLOW}{CONFIG['TARGET_RIPEMD'].hex()}{Colors.END}")
-        print(f"Range: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
+        print(f"Цель: {Colors.YELLOW}{CONFIG['TARGET_RIPEMD'].hex()}{Colors.END}")
+        print(f"Диапазон: {hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}")
         
         if not verify_hash_function():
             return
 
         num_cores = multiprocessing.cpu_count()
-        print(f"Using {num_cores * 2} processes ({num_cores} cores)")
+        print(f"Используется процессов: {num_cores * 2} (ядер: {num_cores})")
         
         with multiprocessing.Manager() as manager:
             stats = manager.dict({'keys_checked': 0, 'keys_found': 0, 'keys_skipped': 0})
@@ -193,18 +190,18 @@ class KeySearcher:
                             self.last_update = stats['keys_checked']
                     
                     self.print_status(stats)
-                    print(f"{Colors.BLUE}Search completed - key not found{Colors.END}")
+                    print(f"{Colors.BLUE}Поиск завершен - ключ не найден{Colors.END}")
                 
                 except Exception as e:
-                    print(f"{Colors.RED}Error: {e}{Colors.END}")
+                    print(f"{Colors.RED}Ошибка: {e}{Colors.END}")
 
     def _handle_found_key(self, key):
-        print(f"\n{Colors.GREEN}>>> KEY FOUND! <<<{Colors.END}")
-        print(f"Private: {Colors.YELLOW}{key}{Colors.END}")
-        print(f"Address: {key_to_ripemd160(key).hex()}")
+        print(f"\n{Colors.GREEN}>>> КЛЮЧ НАЙДЕН! <<<{Colors.END}")
+        print(f"Приватный ключ: {Colors.YELLOW}{key}{Colors.END}")
+        print(f"Адрес: {key_to_ripemd160(key).hex()}")
         
         with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
-            f.write(f"\n{time.ctime()}\nPrivate: {key}\nRIPEMD: {CONFIG['TARGET_RIPEMD'].hex()}\n")
+            f.write(f"\n{time.ctime()}\nПриватный ключ: {key}\nRIPEMD: {CONFIG['TARGET_RIPEMD'].hex()}\n")
 
 if __name__ == "__main__":
     if os.name == 'posix':
