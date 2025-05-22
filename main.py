@@ -1,4 +1,4 @@
-﻿import hashlib
+import hashlib
 import time
 import json
 import os
@@ -19,9 +19,7 @@ class Colors:
     END = '\033[0m'
 
 CONFIG = {
-    'CHECKPOINT_FILE': "checkpoint.json",
     'FOUND_KEYS_FILE': "found_keys.txt",
-    'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'START_KEY': 0x60102a304e0c796a80,
@@ -29,7 +27,8 @@ CONFIG = {
     'BATCH_PER_CORE': 5_000_000,
     'MAX_RETRIES': 3,
     'MIN_ENTROPY': 3.0,
-    'PRIORITY_RANGE_PERCENT': 15
+    'PRIORITY_RANGE_PERCENT': 15,
+    'HASH_TEST_ITERATIONS': 1_000_000
 }
 
 # Предварительно компилируем регулярные выражения
@@ -92,52 +91,26 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
     except Exception:
         return None
 
-def load_checkpoint() -> int:
-    """Загружает последнюю позицию из файла чекпоинта."""
-    if not os.path.exists(CONFIG['CHECKPOINT_FILE']):
-        return CONFIG['START_KEY']
+def perform_hash_test():
+    """Тест скорости хеширования на всех ядрах"""
+    print(f"{Colors.BLUE}=== Running hash speed test ==={Colors.END}")
+    num_cores = multiprocessing.cpu_count()
+    test_data = b"x" * 32
     
-    for attempt in range(CONFIG['MAX_RETRIES']):
-        try:
-            with open(CONFIG['CHECKPOINT_FILE'], 'r') as f:
-                data = json.load(f)
-                last_key = int(data['last_key'], 16)
-                
-                if last_key < CONFIG['START_KEY']:
-                    print(f"{Colors.YELLOW}Checkpoint before start key, resetting to start{Colors.END}")
-                    return CONFIG['START_KEY']
-                elif last_key >= CONFIG['END_KEY']:
-                    print(f"{Colors.YELLOW}Checkpoint at end key, resetting to start{Colors.END}")
-                    return CONFIG['START_KEY']
-                    
-                return last_key + 1
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            print(f"{Colors.RED}Checkpoint error (attempt {attempt+1}): {e}{Colors.END}")
-            time.sleep(1)
+    def worker(_):
+        start = time.time()
+        for _ in range(CONFIG['HASH_TEST_ITERATIONS']):
+            hashlib.sha256(test_data).digest()
+        return CONFIG['HASH_TEST_ITERATIONS'] / (time.time() - start)
     
-    print(f"{Colors.RED}Fatal: Could not load checkpoint{Colors.END}")
-    return CONFIG['START_KEY']
-
-def atomic_save_checkpoint(current_key: int, stats):
-    """Атомарно сохраняет текущую позицию в файл."""
-    temp_file = f"{CONFIG['CHECKPOINT_FILE']}.{os.getpid()}.tmp"
-    data = {
-        'last_key': hex(current_key),
-        'timestamp': time.time(),
-        'stats': dict(stats)
-    }
+    with multiprocessing.Pool(processes=num_cores) as pool:
+        speeds = pool.map(worker, range(num_cores))
+        total_speed = sum(speeds)
     
-    for attempt in range(CONFIG['MAX_RETRIES']):
-        try:
-            with open(temp_file, 'w') as f:
-                json.dump(data, f)
-            os.replace(temp_file, CONFIG['CHECKPOINT_FILE'])
-            return
-        except Exception as e:
-            print(f"{Colors.RED}Save error (attempt {attempt+1}): {e}{Colors.END}")
-            time.sleep(1)
-    
-    print(f"{Colors.RED}Fatal: Failed to save checkpoint{Colors.END}")
+    print(f"Hash speed: {total_speed/1_000_000:.2f} Mhashes/sec ({num_cores} cores)")
+    print(f"Per core: {[s/1_000_000:.2f for s in speeds]} Mhashes/sec")
+    print(f"Test iterations: {CONFIG['HASH_TEST_ITERATIONS']:,}")
+    print(f"{Colors.BLUE}=============================={Colors.END}\n")
 
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
     """Оптимизированная обработка пакета ключей"""
@@ -176,14 +149,14 @@ def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
 
 class KeySearcher:
     def __init__(self):
-        self.current_key = load_checkpoint()
+        self.current_key = CONFIG['START_KEY']
         self.should_stop = False
         self.start_time = time.time()
         signal.signal(signal.SIGINT, self.handle_interrupt)
         signal.signal(signal.SIGTERM, self.handle_interrupt)
 
     def handle_interrupt(self, signum, frame):
-        print(f"\n{Colors.YELLOW}Received interrupt signal, saving progress...{Colors.END}")
+        print(f"\n{Colors.YELLOW}Received interrupt signal, stopping...{Colors.END}")
         self.should_stop = True
 
     def print_status(self, stats):
@@ -227,11 +200,13 @@ class KeySearcher:
         print(f"Priority search: top {CONFIG['PRIORITY_RANGE_PERCENT']}% of range")
         print(f"Filters: entropy > {CONFIG['MIN_ENTROPY']}, pattern checks, checksum validation")
         
-        if self.current_key > CONFIG['START_KEY']:
-            print(f"{Colors.GREEN}Resuming from checkpoint: {hex(self.current_key)}{Colors.END}")
+        # Запуск теста производительности
+        perform_hash_test()
         
         num_cores = multiprocessing.cpu_count()
-        print(f"Using {num_cores} CPU cores")
+        processes_per_core = 2
+        total_processes = num_cores * processes_per_core
+        print(f"Using {total_processes} processes ({num_cores} cores × {processes_per_core} processes per core)")
         
         manager = multiprocessing.Manager()
         shared_stats = manager.dict({
@@ -240,7 +215,7 @@ class KeySearcher:
             'keys_skipped': 0
         })
         
-        pool = multiprocessing.Pool(processes=num_cores, initializer=init_shared_stats, initargs=(shared_stats,))
+        pool = multiprocessing.Pool(processes=total_processes, initializer=init_shared_stats, initargs=(shared_stats,))
         last_status_time = time.time()
         found_key = None
         
@@ -254,11 +229,11 @@ class KeySearcher:
                 
                 batch_end = min(self.current_key + batch_size - 1, CONFIG['END_KEY'])
                 
-                keys_per_core = (batch_end - self.current_key + 1) // num_cores
+                keys_per_process = (batch_end - self.current_key + 1) // total_processes
                 tasks = []
-                for i in range(num_cores):
-                    start = self.current_key + i * keys_per_core
-                    end = start + keys_per_core - 1 if i < num_cores - 1 else batch_end
+                for i in range(total_processes):
+                    start = self.current_key + i * keys_per_process
+                    end = start + keys_per_process - 1 if i < total_processes - 1 else batch_end
                     tasks.append((start, end, CONFIG['TARGET_RIPEMD'], shared_stats))
                 
                 results = pool.starmap(process_key_batch, tasks)
@@ -269,9 +244,6 @@ class KeySearcher:
                         break
                 
                 self.current_key = batch_end + 1
-                
-                if shared_stats['keys_checked'] % CONFIG['SAVE_INTERVAL'] == 0:
-                    atomic_save_checkpoint(self.current_key - 1, shared_stats)
                 
                 if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
                     self.print_status(shared_stats)
@@ -297,9 +269,6 @@ class KeySearcher:
             pool.close()
             pool.join()
             
-            if not found_key and self.current_key > CONFIG['START_KEY']:
-                atomic_save_checkpoint(self.current_key - 1, shared_stats)
-            
             elapsed = time.time() - self.start_time
             total_checked = shared_stats['keys_checked']
             keys_per_sec = total_checked / max(elapsed, 1)
@@ -319,4 +288,3 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     searcher = KeySearcher()
     searcher.run()
-
