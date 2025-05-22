@@ -37,8 +37,8 @@ class StatusMonitor:
             if now - self.last_print >= CONFIG['STATUS_INTERVAL']:
                 elapsed = now - self.start_time
                 keys_per_sec = self.checked.value / max(elapsed, 1)
-                progress = (self.checked.value / self.total_keys) * 100
-                remaining = (self.total_keys - self.checked.value) / max(keys_per_sec, 1)
+                progress = (self.checked.value / self.total_keys) * 100 if self.total_keys > 0 else 0
+                remaining = (self.total_keys - self.checked.value) / max(keys_per_sec, 1) if keys_per_sec > 0 else 0
                 
                 print(f"\r[STATUS] Checked: {self.checked.value:,} | "
                       f"Speed: {keys_per_sec:,.0f} keys/sec | "
