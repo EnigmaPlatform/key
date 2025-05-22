@@ -20,18 +20,18 @@ class Colors:
 
 CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
-    'STATUS_INTERVAL': 10,  # Выводить статус каждые 10 секунд
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'START_KEY': 0x60102a304e0c796a80,
     'END_KEY': 0x7fffffffffffffffff,
-    'BATCH_PER_CORE': 1_000,
+    'BATCH_PER_CORE': 1_000_000,  # 1 миллион ключей на ядро
     'MAX_RETRIES': 3,
     'MIN_ENTROPY': 3.0,
     'PRIORITY_RANGE_PERCENT': 15,
-    'HASH_TEST_ITERATIONS': 1_000_000
+    'HASH_TEST_ITERATIONS': 1_000_000,
+    'UPDATE_INTERVAL': 1_000_000  # Обновлять статус каждые 1M ключей
 }
 
-# Предварительно компилируем регулярные выражения
+# Регулярные выражения
 TRIVIAL_SEQUENCES = re.compile(
     r'(0123|1234|2345|3456|4567|5678|6789|89ab|9abc|abcd|bcde|cdef|def0|fedc|'
     r'0000|1111|2222|3333|4444|5555|6666|7777|8888|9999|aaaa|bbbb|cccc|dddd|eeee|ffff)'
@@ -45,25 +45,22 @@ def init_shared_stats(s):
 
 @lru_cache(maxsize=10000)
 def calculate_entropy(s: str) -> float:
-    """Кэшируем вычисление энтропии для часто встречающихся строк"""
+    """Вычисление энтропии строки"""
     freq = Counter(s)
     total = len(s)
     return -sum((count/total) * math.log2(count/total) for count in freq.values())
 
 def is_junk_key(key_hex: str) -> bool:
-    """Оптимизированная проверка ключа"""
+    """Проверка ключа на тривиальность"""
     if not key_hex.startswith('0'*46):
         return True
     
     significant_part = key_hex[-18:]
     
-    # Быстрые проверки в порядке увеличения сложности
     if REPEATING_CHARS.search(significant_part):
         return True
-        
     if TRIVIAL_SEQUENCES.search(significant_part):
         return True
-        
     if MEME_VALUES.search(significant_part):
         return True
         
@@ -82,7 +79,7 @@ def is_junk_key(key_hex: str) -> bool:
     return False
 
 def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
-    """Оптимизированная конвертация ключа"""
+    """Конвертация приватного ключа в RIPEMD-160"""
     try:
         priv = bytes.fromhex(private_key_hex)
         pub_key = coincurve.PublicKey.from_secret(priv).format(compressed=True)
@@ -91,32 +88,8 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
     except Exception:
         return None
 
-def hash_worker(test_data, iterations):
-    """Вынесенная функция для теста хеширования"""
-    start = time.time()
-    for _ in range(iterations):
-        hashlib.sha256(test_data).digest()
-    return iterations / (time.time() - start)
-
-def perform_hash_test():
-    """Тест скорости хеширования на всех ядрах"""
-    print(f"{Colors.BLUE}=== Running hash speed test ==={Colors.END}")
-    num_cores = multiprocessing.cpu_count()
-    test_data = b"x" * 32
-    
-    with multiprocessing.Pool(processes=num_cores) as pool:
-        speeds = pool.starmap(hash_worker, [(test_data, CONFIG['HASH_TEST_ITERATIONS'])] * num_cores)
-        total_speed = sum(speeds)
-    
-    speed_per_core = [round(s/1_000_000, 2) for s in speeds]
-    
-    print(f"Hash speed: {total_speed/1_000_000:.2f} Mhashes/sec ({num_cores} cores)")
-    print(f"Per core: {speed_per_core} Mhashes/sec")
-    print(f"Test iterations: {CONFIG['HASH_TEST_ITERATIONS']:,}")
-    print(f"{Colors.BLUE}=============================={Colors.END}\n")
-
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
-    """Оптимизированная обработка пакета ключей"""
+    """Обработка пакета ключей"""
     local_checked = 0
     local_skipped = 0
     
@@ -138,7 +111,7 @@ def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
                 return private_key
             local_checked += 1
             
-        if local_checked % 1_000_000 == 0:
+        if local_checked % 100_000 == 0:  # Частичное обновление статистики
             stats['keys_checked'] += local_checked
             stats['keys_skipped'] += local_skipped
             local_checked = 0
@@ -155,7 +128,7 @@ class KeySearcher:
         self.current_key = CONFIG['START_KEY']
         self.should_stop = False
         self.start_time = time.time()
-        self.last_status_time = time.time()
+        self.last_update = 0
         signal.signal(signal.SIGINT, self.handle_interrupt)
         signal.signal(signal.SIGTERM, self.handle_interrupt)
 
@@ -164,7 +137,7 @@ class KeySearcher:
         self.should_stop = True
 
     def print_status(self, stats):
-        """Выводит текущий статус поиска"""
+        """Вывод текущего статуса"""
         elapsed = time.time() - self.start_time
         keys_per_sec = stats['keys_checked'] / max(elapsed, 1)
         
@@ -172,19 +145,18 @@ class KeySearcher:
         remaining_time = remaining_keys / max(keys_per_sec, 1)
         
         print(
-            f"{Colors.BLUE}[Status]{Colors.END} "
-            f"Keys: {Colors.YELLOW}{stats['keys_checked']:,}{Colors.END} | "
-            f"Skipped: {stats['keys_skipped']:,} | "
-            f"Speed: {self.format_speed(keys_per_sec)} | "
-            f"Progress: {self.get_progress():.2f}% | "
-            f"Elapsed: {elapsed/3600:.1f}h | "
-            f"Remaining: {remaining_time/3600:.1f}h | "
-            f"Current: {hex(self.current_key)}"
-        )
-        self.last_status_time = time.time()
+            f"\n{Colors.BLUE}=== Status Update ===")
+        print(f"Keys checked: {Colors.YELLOW}{stats['keys_checked']:,}{Colors.END}")
+        print(f"Keys skipped: {stats['keys_skipped']:,}")
+        print(f"Speed: {self.format_speed(keys_per_sec)} keys/sec")
+        print(f"Progress: {self.get_progress():.2f}%")
+        print(f"Elapsed: {elapsed/3600:.2f} hours")
+        print(f"Remaining: {remaining_time/3600:.2f} hours")
+        print(f"Current key: {hex(self.current_key)}")
+        print(f"==================={Colors.END}\n")
 
     def format_speed(self, speed: float) -> str:
-        """Форматирует скорость перебора."""
+        """Форматирование скорости"""
         if speed > 1_000_000:
             return f"{Colors.GREEN}{speed/1_000_000:.2f}M{Colors.END}"
         elif speed > 100_000:
@@ -192,25 +164,22 @@ class KeySearcher:
         return f"{Colors.RED}{speed:,.0f}{Colors.END}"
 
     def get_progress(self) -> float:
-        """Вычисляет процент выполнения."""
+        """Расчет прогресса"""
         total = CONFIG['END_KEY'] - CONFIG['START_KEY']
         done = self.current_key - CONFIG['START_KEY']
         return min(100.0, done / total * 100) if total > 0 else 0
 
     def run(self):
-        """Основной цикл поиска ключей."""
+        """Основной цикл поиска"""
         print(f"{Colors.BLUE}=== Bitcoin Puzzle Solver ==={Colors.END}")
         print(f"Target: {Colors.YELLOW}{CONFIG['TARGET_RIPEMD'].hex()}{Colors.END}")
         print(f"Range: {Colors.YELLOW}{hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}{Colors.END}")
         print(f"Priority search: top {CONFIG['PRIORITY_RANGE_PERCENT']}% of range")
         print(f"Filters: entropy > {CONFIG['MIN_ENTROPY']}, pattern checks, checksum validation")
         
-        perform_hash_test()
-        
         num_cores = multiprocessing.cpu_count()
-        processes_per_core = 2
-        total_processes = num_cores * processes_per_core
-        print(f"Using {total_processes} processes ({num_cores} cores × {processes_per_core} processes per core)")
+        total_processes = num_cores * 2  # 2 процесса на ядро
+        print(f"Using {total_processes} processes ({num_cores} cores)")
         
         manager = multiprocessing.Manager()
         shared_stats = manager.dict({
@@ -224,17 +193,10 @@ class KeySearcher:
         
         try:
             while self.current_key <= CONFIG['END_KEY'] and not found_key and not self.should_stop:
-                if time.time() - self.last_status_time >= CONFIG['STATUS_INTERVAL']:
-                    self.print_status(shared_stats)
-                
-                current_percent = (self.current_key - CONFIG['START_KEY']) / (CONFIG['END_KEY'] - CONFIG['START_KEY'])
-                if current_percent > 0.85:
-                    batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
-                else:
-                    batch_size = CONFIG['BATCH_PER_CORE'] * num_cores * 4
-                
+                batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
                 batch_end = min(self.current_key + batch_size - 1, CONFIG['END_KEY'])
                 
+                # Разделяем работу между процессами
                 keys_per_process = (batch_end - self.current_key + 1) // total_processes
                 tasks = []
                 for i in range(total_processes):
@@ -242,15 +204,23 @@ class KeySearcher:
                     end = start + keys_per_process - 1 if i < total_processes - 1 else batch_end
                     tasks.append((start, end, CONFIG['TARGET_RIPEMD'], shared_stats))
                 
+                # Запускаем обработку
                 results = pool.starmap(process_key_batch, tasks)
                 
+                # Проверяем результаты
                 for result in results:
                     if result:
                         found_key = result
                         break
                 
                 self.current_key = batch_end + 1
+                
+                # Обновляем статус каждые 1M ключей
+                if shared_stats['keys_checked'] - self.last_update >= CONFIG['UPDATE_INTERVAL']:
+                    self.print_status(shared_stats)
+                    self.last_update = shared_stats['keys_checked']
             
+            # Финальный статус
             self.print_status(shared_stats)
             
             if found_key:
@@ -273,6 +243,7 @@ class KeySearcher:
             pool.close()
             pool.join()
             
+            # Финальная статистика
             elapsed = time.time() - self.start_time
             total_checked = shared_stats['keys_checked']
             keys_per_sec = total_checked / max(elapsed, 1)
@@ -281,7 +252,7 @@ class KeySearcher:
             print(f"Total keys checked: {total_checked:,}")
             print(f"Total keys skipped: {shared_stats['keys_skipped']:,}")
             print(f"Total time: {elapsed/3600:.2f} hours")
-            print(f"Average speed: {self.format_speed(keys_per_sec)}")
+            print(f"Average speed: {self.format_speed(keys_per_sec)} keys/sec")
             print(f"Last checked key: {hex(self.current_key)}")
             print(f"==================={Colors.END}")
 
