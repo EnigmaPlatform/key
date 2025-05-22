@@ -107,8 +107,11 @@ def perform_hash_test():
         speeds = pool.map(worker, range(num_cores))
         total_speed = sum(speeds)
     
+    # Fixed the list comprehension syntax here
+    speed_per_core = [round(s/1_000_000, 2) for s in speeds]
+    
     print(f"Hash speed: {total_speed/1_000_000:.2f} Mhashes/sec ({num_cores} cores)")
-    print(f"Per core: {[s/1_000_000:.2f for s in speeds]} Mhashes/sec")
+    print(f"Per core: {speed_per_core} Mhashes/sec")
     print(f"Test iterations: {CONFIG['HASH_TEST_ITERATIONS']:,}")
     print(f"{Colors.BLUE}=============================={Colors.END}\n")
 
