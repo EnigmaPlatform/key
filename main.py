@@ -24,7 +24,7 @@ CONFIG = {
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'START_KEY': 0x60102a304e0c796a80,
     'END_KEY': 0x7fffffffffffffffff,
-    'BATCH_PER_CORE': 5_000_000,
+    'BATCH_PER_CORE': 1_000,
     'MAX_RETRIES': 3,
     'MIN_ENTROPY': 3.0,
     'PRIORITY_RANGE_PERCENT': 15,
