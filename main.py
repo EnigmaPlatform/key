@@ -91,23 +91,23 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
     except Exception:
         return None
 
+def hash_worker(test_data, iterations):
+    """Вынесенная функция для теста хеширования"""
+    start = time.time()
+    for _ in range(iterations):
+        hashlib.sha256(test_data).digest()
+    return iterations / (time.time() - start)
+
 def perform_hash_test():
     """Тест скорости хеширования на всех ядрах"""
     print(f"{Colors.BLUE}=== Running hash speed test ==={Colors.END}")
     num_cores = multiprocessing.cpu_count()
     test_data = b"x" * 32
     
-    def worker(_):
-        start = time.time()
-        for _ in range(CONFIG['HASH_TEST_ITERATIONS']):
-            hashlib.sha256(test_data).digest()
-        return CONFIG['HASH_TEST_ITERATIONS'] / (time.time() - start)
-    
     with multiprocessing.Pool(processes=num_cores) as pool:
-        speeds = pool.map(worker, range(num_cores))
+        speeds = pool.starmap(hash_worker, [(test_data, CONFIG['HASH_TEST_ITERATIONS'])] * num_cores)
         total_speed = sum(speeds)
     
-    # Fixed the list comprehension syntax here
     speed_per_core = [round(s/1_000_000, 2) for s in speeds]
     
     print(f"Hash speed: {total_speed/1_000_000:.2f} Mhashes/sec ({num_cores} cores)")
