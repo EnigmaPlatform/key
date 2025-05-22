@@ -23,7 +23,7 @@ CONFIG = {
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
     'TARGET_RIPEMD': bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10"),
-    'START_KEY': 0x349b84b6431a614ef1,
+    'START_KEY': 0x349b84b6431a5c4ef1,
     'END_KEY': 0x349b84b6431a6c4ef1,
     'BATCH_PER_CORE': 10_000_000,
     'MAX_RETRIES': 3,
@@ -44,18 +44,19 @@ def calculate_entropy(s: str) -> float:
     return entropy
 
 def is_junk_key(key_hex: str) -> bool:
-    """Проверяет ключ на наличие нежелательных паттернов."""
-    significant_part = key_hex.lstrip('0')[-18:]  # Берем значимую часть без ведущих нулей
+    """Проверяет ключ на наличие нежелательных паттернов (работает только с изменяемой частью)."""
+    # Фиксированный префикс: 46 нулей (первые 46 символов)
+    # Изменяемая часть: последние 18 символов
+    if not key_hex.startswith('0'*46):
+        return True  # Пропускаем ключи без правильного префикса
     
-    # 1. Проверка на 60+ ведущих нулей
-    if not key_hex.startswith('0'*60):
-        return True
+    significant_part = key_hex[-18:]  # Берем только изменяемую часть
     
-    # 2. Проверка на повторяющиеся последовательности (4+ одинаковых символа)
+    # 1. Проверка на повторяющиеся последовательности (4+ одинаковых символа)
     if re.search(r'(.)\1{3}', significant_part):
         return True
     
-    # 3. Проверка на тривиальные последовательности
+    # 2. Проверка на тривиальные последовательности
     trivial_sequences = [
         '0123', '1234', '2345', '3456', '4567', '5678', '6789',
         '89ab', '9abc', 'abcd', 'bcde', 'cdef', 'def0', 'fedc',
@@ -66,21 +67,21 @@ def is_junk_key(key_hex: str) -> bool:
     if any(seq in significant_part for seq in trivial_sequences):
         return True
     
-    # 4. Проверка на низкую энтропию
+    # 3. Проверка на низкую энтропию
     if len(significant_part) >= 8 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
         return True
     
-    # 5. Проверка на "мемные" значения
+    # 4. Проверка на "мемные" значения
     meme_values = ['dead', 'beef', 'cafe', 'face', 'bad', 'feed', 'ace', 'add']
     if any(meme in significant_part for meme in meme_values):
         return True
     
-    # 6. Проверка на слишком простые ключи (ИСПРАВЛЕННАЯ ЧАСТЬ)
+    # 5. Проверка на слишком простые ключи
     hex_digits = set(significant_part.lower())
     if hex_digits.issubset(set('01234567')) or hex_digits.issubset(set('89abcdef')):
         return True
     
-    # 7. Проверка контрольной суммы (сумма последних 16 символов кратна 8)
+    # 6. Проверка контрольной суммы (сумма последних 16 символов кратна 8)
     if len(significant_part) >= 16:
         last_16 = significant_part[-16:]
         if sum(int(c, 16) for c in last_16) % 8 != 0:
