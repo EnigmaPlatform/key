@@ -24,7 +24,7 @@ CONFIG = {
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
-    'START_KEY': 0x60102a304aa8a17280,
+    'START_KEY': 0x60102a304e0c796a80,
     'END_KEY': 0x7fffffffffffffffff,
     'BATCH_PER_CORE': 5_000_000,
     'MAX_RETRIES': 3,
