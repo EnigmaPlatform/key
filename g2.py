@@ -4,6 +4,7 @@ import multiprocessing
 import coincurve
 from typing import Optional
 import time
+from datetime import datetime, timedelta
 
 # Конфигурация
 CONFIG = {
@@ -18,13 +19,34 @@ CONFIG = {
     'STATUS_INTERVAL': 5
 }
 
-def print_status(checked, total, speed, elapsed):
-    """Красивый вывод статуса"""
-    progress = (checked / total) * 100
-    print(f"\r[STATUS] Checked: {checked:,} | "
-          f"Speed: {speed:,.0f} keys/sec | "
-          f"Progress: {progress:.4f}% | "
-          f"Elapsed: {elapsed:.1f}s", end='', flush=True)
+class StatusMonitor:
+    def __init__(self, total_keys):
+        self.total_keys = total_keys
+        self.start_time = time.time()
+        self.last_print = 0
+        self.checked = multiprocessing.Value('L', 0)
+        self.lock = multiprocessing.Lock()
+        
+    def update(self, count):
+        with self.lock:
+            self.checked.value += count
+            
+    def print_status(self):
+        with self.lock:
+            now = time.time()
+            if now - self.last_print >= CONFIG['STATUS_INTERVAL']:
+                elapsed = now - self.start_time
+                keys_per_sec = self.checked.value / max(elapsed, 1)
+                progress = (self.checked.value / self.total_keys) * 100
+                remaining = (self.total_keys - self.checked.value) / max(keys_per_sec, 1)
+                
+                print(f"\r[STATUS] Checked: {self.checked.value:,} | "
+                      f"Speed: {keys_per_sec:,.0f} keys/sec | "
+                      f"Progress: {progress:.4f}% | "
+                      f"Elapsed: {str(timedelta(seconds=int(elapsed))} | "
+                      f"Remaining: {str(timedelta(seconds=int(remaining))}",
+                      end='', flush=True)
+                self.last_print = now
 
 def is_valid_key(key_hex: str) -> bool:
     if ('000' in key_hex or '111' in key_hex or '222' in key_hex or '333' in key_hex or
@@ -54,7 +76,7 @@ def process_batch(start: int, end: int) -> Optional[str]:
             return key
     return None
 
-def worker(input_queue, output_queue, stats):
+def worker(input_queue, output_queue, status_monitor):
     while True:
         try:
             batch = input_queue.get(timeout=1)
@@ -66,18 +88,20 @@ def worker(input_queue, output_queue, stats):
             if found_key:
                 output_queue.put(found_key)
             
-            with stats.get_lock():
-                stats.value += end - start + 1
+            status_monitor.update(end - start + 1)
+            status_monitor.print_status()
         except:
             break
 
 def save_key(key: str):
     with open(CONFIG['OUTPUT_FILE'], 'a') as f:
+        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Key: {key}\n")
         f.write(f"Address: {key_to_ripemd160(key).hex()}\n\n")
 
 def key_searcher():
-    print(f"[INFO] Starting search from {hex(CONFIG['START_KEY'])} to {hex(CONFIG['END_KEY'])}")
+    print(f"[INFO] Starting search at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] Range: {hex(CONFIG['START_KEY'])} to {hex(CONFIG['END_KEY'])}")
     print(f"[INFO] CPU workers: {CONFIG['WORKERS']}")
     print(f"[INFO] Batch size: {CONFIG['BATCH_SIZE']:,}")
     print(f"[INFO] Target hash: {CONFIG['TARGET_RIPEMD'].hex()}")
@@ -87,14 +111,13 @@ def key_searcher():
 
     input_queue = multiprocessing.Queue(maxsize=CONFIG['WORKERS'] * 2)
     output_queue = multiprocessing.Queue()
-    stats = multiprocessing.Value('L', 0)
-    last_status = multiprocessing.Value('d', time.time())
+    status_monitor = StatusMonitor(total_keys)
 
     processes = []
     for i in range(CONFIG['WORKERS']):
         p = multiprocessing.Process(
             target=worker,
-            args=(input_queue, output_queue, stats),
+            args=(input_queue, output_queue, status_monitor),
             daemon=True
         )
         p.start()
@@ -110,29 +133,22 @@ def key_searcher():
     for _ in range(CONFIG['WORKERS']):
         input_queue.put(None)
 
-    start_time = time.time()
-    last_print = time.time()
-    
+    found_keys = 0
     while any(p.is_alive() for p in processes):
         time.sleep(0.1)
         
-        if not output_queue.empty():
+        while not output_queue.empty():
             found_key = output_queue.get()
+            found_keys += 1
             print(f"\n[SUCCESS] Found matching key: {found_key}")
             save_key(found_key)
-
-        now = time.time()
-        if now - last_print >= CONFIG['STATUS_INTERVAL']:
-            with stats.get_lock():
-                checked = stats.value
-                elapsed = now - start_time
-                speed = checked / max(elapsed, 1)
-                print_status(checked, total_keys, speed, elapsed)
-                last_print = now
+        
+        status_monitor.print_status()
 
     print("\n[INFO] Search completed")
-    print(f"[STATS] Total checked: {stats.value:,}")
-    print(f"[STATS] Total time: {time.time() - start_time:.1f}s")
+    print(f"[STATS] Total checked: {status_monitor.checked.value:,}")
+    print(f"[STATS] Total found: {found_keys}")
+    print(f"[STATS] Total time: {str(timedelta(seconds=int(time.time() - status_monitor.start_time))}")
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
