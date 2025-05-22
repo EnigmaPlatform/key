@@ -9,6 +9,7 @@ import math
 import re
 from typing import Optional
 from collections import Counter
+from functools import lru_cache
 
 class Colors:
     GREEN = '\033[92m'
@@ -22,80 +23,72 @@ CONFIG = {
     'FOUND_KEYS_FILE': "found_keys.txt",
     'SAVE_INTERVAL': 10_000_000,
     'STATUS_INTERVAL': 60,
-    'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
-    'START_KEY': 0x6fffffffffffffffff,
-    'END_KEY': 0x7fffffffffffffffff,
+    'TARGET_RIPEMD': bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10"),
+    'START_KEY': 0x349b84b6431a5c4ef1,
+    'END_KEY': 0x349b84b6431a6c4ef1,
     'BATCH_PER_CORE': 1_000_000,
     'MAX_RETRIES': 3,
     'MIN_ENTROPY': 3.0,
     'PRIORITY_RANGE_PERCENT': 15
 }
 
+# Предварительно компилируем регулярные выражения
+TRIVIAL_SEQUENCES = re.compile(
+    r'(0123|1234|2345|3456|4567|5678|6789|89ab|9abc|abcd|bcde|cdef|def0|fedc|'
+    r'0000|1111|2222|3333|4444|5555|6666|7777|8888|9999|aaaa|bbbb|cccc|dddd|eeee|ffff)'
+)
+MEME_VALUES = re.compile(r'(dead|beef|cafe|face|bad|feed|ace|add)')
+REPEATING_CHARS = re.compile(r'(.)\1{3}')
+
 def init_shared_stats(s):
     global shared_stats
     shared_stats = s
 
+@lru_cache(maxsize=10000)
 def calculate_entropy(s: str) -> float:
-    """Вычисляет энтропию строки в битах на символ."""
-    freq = {}
-    for char in s:
-        freq[char] = freq.get(char, 0) + 1
-    entropy = -sum((f / len(s)) * math.log2(f / len(s)) for f in freq.values())
-    return entropy
+    """Кэшируем вычисление энтропии для часто встречающихся строк"""
+    freq = Counter(s)
+    total = len(s)
+    return -sum((count/total) * math.log2(count/total) for count in freq.values())
 
 def is_junk_key(key_hex: str) -> bool:
-    """Проверяет ключ на наличие нежелательных паттернов (работает только с изменяемой частью)."""
-    # Фиксированный префикс: 46 нулей (первые 46 символов)
-    # Изменяемая часть: последние 18 символов
+    """Оптимизированная проверка ключа"""
     if not key_hex.startswith('0'*46):
-        return True  # Пропускаем ключи без правильного префикса
-    
-    significant_part = key_hex[-18:]  # Берем только изменяемую часть
-    
-    # 1. Проверка на повторяющиеся последовательности (4+ одинаковых символа)
-    if re.search(r'(.)\1{3}', significant_part):
         return True
     
-    # 2. Проверка на тривиальные последовательности
-    trivial_sequences = [
-        '0123', '1234', '2345', '3456', '4567', '5678', '6789',
-        '89ab', '9abc', 'abcd', 'bcde', 'cdef', 'def0', 'fedc',
-        '0000', '1111', '2222', '3333', '4444', '5555', '6666',
-        '7777', '8888', '9999', 'aaaa', 'bbbb', 'cccc', 'dddd',
-        'eeee', 'ffff'
-    ]
-    if any(seq in significant_part for seq in trivial_sequences):
-        return True
+    significant_part = key_hex[-18:]
     
-    # 3. Проверка на низкую энтропию
-    if len(significant_part) >= 8 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
+    # Быстрые проверки в порядке увеличения сложности
+    if REPEATING_CHARS.search(significant_part):
         return True
-    
-    # 4. Проверка на "мемные" значения
-    meme_values = ['dead', 'beef', 'cafe', 'face', 'bad', 'feed', 'ace', 'add']
-    if any(meme in significant_part for meme in meme_values):
+        
+    if TRIVIAL_SEQUENCES.search(significant_part):
         return True
-    
-    # 5. Проверка на слишком простые ключи
+        
+    if MEME_VALUES.search(significant_part):
+        return True
+        
     hex_digits = set(significant_part.lower())
     if hex_digits.issubset(set('01234567')) or hex_digits.issubset(set('89abcdef')):
         return True
-    
-    # 6. Проверка контрольной суммы (сумма последних 16 символов кратна 8)
+        
     if len(significant_part) >= 16:
         last_16 = significant_part[-16:]
         if sum(int(c, 16) for c in last_16) % 8 != 0:
             return True
+            
+    if len(significant_part) >= 8 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
+        return True
     
     return False
 
 def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
-    """Конвертирует приватный ключ в RIPEMD-160 хеш адреса."""
+    """Оптимизированная конвертация ключа"""
     try:
         priv = bytes.fromhex(private_key_hex)
-        pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
+        pub_key = coincurve.PublicKey.from_secret(priv).format(compressed=True)
         sha256 = hashlib.sha256(pub_key).digest()
-        return hashlib.new('ripemd160', sha256).digest()
+        return hashlib.new('ripemd160', sha256, usedforsecurity=False).digest()
     except Exception:
         return None
 
@@ -147,37 +140,35 @@ def atomic_save_checkpoint(current_key: int, stats):
     print(f"{Colors.RED}Fatal: Failed to save checkpoint{Colors.END}")
 
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
-    """Обрабатывает пакет ключей в одном процессе."""
+    """Оптимизированная обработка пакета ключей"""
     local_checked = 0
     local_skipped = 0
     
-    # Определяем, находимся ли мы в приоритетном диапазоне
     priority_threshold = CONFIG['END_KEY'] - (CONFIG['END_KEY'] - CONFIG['START_KEY']) * CONFIG['PRIORITY_RANGE_PERCENT'] // 100
     is_priority_range = end_key >= priority_threshold
     
-    # Для приоритетного диапазона идем в обратном порядке
-    if is_priority_range:
-        keys = range(end_key, start_key - 1, -1)
-    else:
-        keys = range(start_key, end_key + 1)
+    step = -1 if is_priority_range else 1
+    current = end_key if is_priority_range else start_key
+    end = start_key - 1 if is_priority_range else end_key + 1
     
-    for k in keys:
-        private_key = f"{k:064x}"
+    while current != end:
+        private_key = f"{current:064x}"
         
         if not is_priority_range and is_junk_key(private_key):
             local_skipped += 1
-            continue
+        else:
+            if (ripemd := key_to_ripemd160(private_key)) and ripemd == target:
+                stats['keys_found'] += 1
+                return private_key
+            local_checked += 1
             
-        if (ripemd := key_to_ripemd160(private_key)) and ripemd == target:
-            stats['keys_found'] += 1
-            return private_key
-        
-        local_checked += 1
-        if local_checked % 100_000 == 0:
+        if local_checked % 1_000_000 == 0:
             stats['keys_checked'] += local_checked
             stats['keys_skipped'] += local_skipped
             local_checked = 0
             local_skipped = 0
+            
+        current += step
     
     stats['keys_checked'] += local_checked
     stats['keys_skipped'] += local_skipped
@@ -196,11 +187,10 @@ class KeySearcher:
         self.should_stop = True
 
     def print_status(self, stats):
-        """Выводит текущий статус поиска."""
+        """Выводит текущий статус поиска с полным отображением текущего ключа"""
         elapsed = time.time() - self.start_time
         keys_per_sec = stats['keys_checked'] / max(elapsed, 1)
         
-        # Расчет оставшегося времени
         remaining_keys = CONFIG['END_KEY'] - self.current_key
         remaining_time = remaining_keys / max(keys_per_sec, 1)
         
@@ -212,7 +202,7 @@ class KeySearcher:
             f"Progress: {self.get_progress():.2f}% | "
             f"Elapsed: {elapsed/3600:.1f}h | "
             f"Remaining: {remaining_time/3600:.1f}h | "
-            f"Current: {hex(self.current_key)[:12]}..."
+            f"Current: {hex(self.current_key)}"
         )
 
     def format_speed(self, speed: float) -> str:
@@ -256,16 +246,14 @@ class KeySearcher:
         
         try:
             while self.current_key <= CONFIG['END_KEY'] and not found_key and not self.should_stop:
-                # Динамический размер пакета
                 current_percent = (self.current_key - CONFIG['START_KEY']) / (CONFIG['END_KEY'] - CONFIG['START_KEY'])
-                if current_percent > 0.85:  # Верхние 15%
+                if current_percent > 0.85:
                     batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
                 else:
                     batch_size = CONFIG['BATCH_PER_CORE'] * num_cores * 4
                 
                 batch_end = min(self.current_key + batch_size - 1, CONFIG['END_KEY'])
                 
-                # Распределение задач
                 keys_per_core = (batch_end - self.current_key + 1) // num_cores
                 tasks = []
                 for i in range(num_cores):
@@ -273,10 +261,8 @@ class KeySearcher:
                     end = start + keys_per_core - 1 if i < num_cores - 1 else batch_end
                     tasks.append((start, end, CONFIG['TARGET_RIPEMD'], shared_stats))
                 
-                # Параллельное выполнение
                 results = pool.starmap(process_key_batch, tasks)
                 
-                # Проверка результатов
                 for result in results:
                     if result:
                         found_key = result
@@ -284,16 +270,13 @@ class KeySearcher:
                 
                 self.current_key = batch_end + 1
                 
-                # Сохранение прогресса
                 if shared_stats['keys_checked'] % CONFIG['SAVE_INTERVAL'] == 0:
                     atomic_save_checkpoint(self.current_key - 1, shared_stats)
                 
-                # Вывод статуса
                 if time.time() - last_status_time >= CONFIG['STATUS_INTERVAL']:
                     self.print_status(shared_stats)
                     last_status_time = time.time()
             
-            # Обработка результатов
             if found_key:
                 print(f"\n{Colors.GREEN}>>> KEY FOUND! <<<{Colors.END}")
                 print(f"Private: {Colors.YELLOW}{found_key}{Colors.END}")
@@ -330,6 +313,9 @@ class KeySearcher:
             print(f"==================={Colors.END}")
 
 if __name__ == "__main__":
+    if os.name == 'posix':
+        multiprocessing.set_start_method('fork')
+        
     multiprocessing.freeze_support()
     searcher = KeySearcher()
     searcher.run()
