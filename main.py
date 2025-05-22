@@ -28,7 +28,7 @@ CONFIG = {
     'BATCH_PER_CORE': 10_000_000,
     'MAX_RETRIES': 3,
     'MIN_ENTROPY': 3.0,
-    'PRIORITY_RANGE_PERCENT': 15  # Процент верхнего диапазона для приоритетного поиска
+    'PRIORITY_RANGE_PERCENT': 15
 }
 
 def init_shared_stats(s):
@@ -44,8 +44,8 @@ def calculate_entropy(s: str) -> float:
     return entropy
 
 def is_junk_key(key_hex: str) -> bool:
-    """Усовершенствованная проверка ключа на нежелательные паттерны."""
-    significant_part = key_hex.lstrip('0')[-20:]  # Берем последние 20 значащих символов
+    """Проверяет ключ на наличие нежелательных паттернов."""
+    significant_part = key_hex.lstrip('0')[-18:]  # Берем значимую часть без ведущих нулей
     
     # 1. Проверка на 60+ ведущих нулей
     if not key_hex.startswith('0'*60):
@@ -67,7 +67,7 @@ def is_junk_key(key_hex: str) -> bool:
         return True
     
     # 4. Проверка на низкую энтропию
-    if len(significant_part) >= 12 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
+    if len(significant_part) >= 8 and calculate_entropy(significant_part) < CONFIG['MIN_ENTROPY']:
         return True
     
     # 5. Проверка на "мемные" значения
@@ -75,21 +75,21 @@ def is_junk_key(key_hex: str) -> bool:
     if any(meme in significant_part for meme in meme_values):
         return True
     
-    # 6. Проверка контрольной суммы (сумма последних 16 символов кратна 8)
+    # 6. Проверка на слишком простые ключи (ИСПРАВЛЕННАЯ ЧАСТЬ)
+    hex_digits = set(significant_part.lower())
+    if hex_digits.issubset(set('01234567')) or hex_digits.issubset(set('89abcdef')):
+        return True
+    
+    # 7. Проверка контрольной суммы (сумма последних 16 символов кратна 8)
     if len(significant_part) >= 16:
         last_16 = significant_part[-16:]
         if sum(int(c, 16) for c in last_16) % 8 != 0:
             return True
     
-    # 7. Проверка на простые диапазоны (только 0-7 или только 8-f)
-    hex_digits = set(significant_part.lower())
-    if (hex_digits.issubset(set('01234567')) or (hex_digits.issubset(set('89abcdef'))):
-        return True
-    
     return False
 
 def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
-    """Оптимизированная конвертация приватного ключа в RIPEMD-160."""
+    """Конвертирует приватный ключ в RIPEMD-160 хеш адреса."""
     try:
         priv = bytes.fromhex(private_key_hex)
         pub_key = coincurve.PublicKey.from_valid_secret(priv).format(compressed=True)
@@ -99,7 +99,7 @@ def key_to_ripemd160(private_key_hex: str) -> Optional[bytes]:
         return None
 
 def load_checkpoint() -> int:
-    """Улучшенная загрузка чекпоинта с валидацией."""
+    """Загружает последнюю позицию из файла чекпоинта."""
     if not os.path.exists(CONFIG['CHECKPOINT_FILE']):
         return CONFIG['START_KEY']
     
@@ -109,9 +109,11 @@ def load_checkpoint() -> int:
                 data = json.load(f)
                 last_key = int(data['last_key'], 16)
                 
-                # Проверяем, что ключ в допустимом диапазоне
-                if not CONFIG['START_KEY'] <= last_key <= CONFIG['END_KEY']:
-                    print(f"{Colors.YELLOW}Checkpoint out of range, resetting to start{Colors.END}")
+                if last_key < CONFIG['START_KEY']:
+                    print(f"{Colors.YELLOW}Checkpoint before start key, resetting to start{Colors.END}")
+                    return CONFIG['START_KEY']
+                elif last_key >= CONFIG['END_KEY']:
+                    print(f"{Colors.YELLOW}Checkpoint at end key, resetting to start{Colors.END}")
                     return CONFIG['START_KEY']
                     
                 return last_key + 1
@@ -123,7 +125,7 @@ def load_checkpoint() -> int:
     return CONFIG['START_KEY']
 
 def atomic_save_checkpoint(current_key: int, stats):
-    """Надежное сохранение чекпоинта."""
+    """Атомарно сохраняет текущую позицию в файл."""
     temp_file = f"{CONFIG['CHECKPOINT_FILE']}.{os.getpid()}.tmp"
     data = {
         'last_key': hex(current_key),
@@ -144,7 +146,7 @@ def atomic_save_checkpoint(current_key: int, stats):
     print(f"{Colors.RED}Fatal: Failed to save checkpoint{Colors.END}")
 
 def process_key_batch(start_key: int, end_key: int, target: bytes, stats):
-    """Оптимизированная обработка пакета ключей."""
+    """Обрабатывает пакет ключей в одном процессе."""
     local_checked = 0
     local_skipped = 0
     
@@ -193,7 +195,7 @@ class KeySearcher:
         self.should_stop = True
 
     def print_status(self, stats):
-        """Улучшенный вывод статуса."""
+        """Выводит текущий статус поиска."""
         elapsed = time.time() - self.start_time
         keys_per_sec = stats['keys_checked'] / max(elapsed, 1)
         
@@ -213,17 +215,12 @@ class KeySearcher:
         )
 
     def format_speed(self, speed: float) -> str:
-        """Форматирование скорости с цветами."""
+        """Форматирует скорость перебора."""
         if speed > 1_000_000:
-            color = Colors.GREEN
-            speed_str = f"{speed/1_000_000:.2f}M"
+            return f"{Colors.GREEN}{speed/1_000_000:.2f}M{Colors.END}"
         elif speed > 100_000:
-            color = Colors.YELLOW
-            speed_str = f"{speed/1_000:.0f}K"
-        else:
-            color = Colors.RED
-            speed_str = f"{speed:,.0f}"
-        return f"{color}{speed_str}{Colors.END}"
+            return f"{Colors.YELLOW}{speed/1_000:.0f}K{Colors.END}"
+        return f"{Colors.RED}{speed:,.0f}{Colors.END}"
 
     def get_progress(self) -> float:
         """Вычисляет процент выполнения."""
@@ -232,18 +229,18 @@ class KeySearcher:
         return min(100.0, done / total * 100) if total > 0 else 0
 
     def run(self):
-        """Основной цикл поиска с оптимизациями."""
+        """Основной цикл поиска ключей."""
         print(f"{Colors.BLUE}=== Bitcoin Puzzle Solver ==={Colors.END}")
         print(f"Target: {Colors.YELLOW}{CONFIG['TARGET_RIPEMD'].hex()}{Colors.END}")
         print(f"Range: {Colors.YELLOW}{hex(CONFIG['START_KEY'])} - {hex(CONFIG['END_KEY'])}{Colors.END}")
         print(f"Priority search: top {CONFIG['PRIORITY_RANGE_PERCENT']}% of range")
+        print(f"Filters: entropy > {CONFIG['MIN_ENTROPY']}, pattern checks, checksum validation")
         
         if self.current_key > CONFIG['START_KEY']:
             print(f"{Colors.GREEN}Resuming from checkpoint: {hex(self.current_key)}{Colors.END}")
         
         num_cores = multiprocessing.cpu_count()
         print(f"Using {num_cores} CPU cores")
-        print(f"Filters: entropy > {CONFIG['MIN_ENTROPY']}, pattern checks, checksum validation")
         
         manager = multiprocessing.Manager()
         shared_stats = manager.dict({
@@ -258,7 +255,7 @@ class KeySearcher:
         
         try:
             while self.current_key <= CONFIG['END_KEY'] and not found_key and not self.should_stop:
-                # Динамический размер пакета в зависимости от позиции
+                # Динамический размер пакета
                 current_percent = (self.current_key - CONFIG['START_KEY']) / (CONFIG['END_KEY'] - CONFIG['START_KEY'])
                 if current_percent > 0.85:  # Верхние 15%
                     batch_size = CONFIG['BATCH_PER_CORE'] * num_cores
@@ -267,7 +264,7 @@ class KeySearcher:
                 
                 batch_end = min(self.current_key + batch_size - 1, CONFIG['END_KEY'])
                 
-                # Распределение задач по ядрам
+                # Распределение задач
                 keys_per_core = (batch_end - self.current_key + 1) // num_cores
                 tasks = []
                 for i in range(num_cores):
@@ -297,7 +294,14 @@ class KeySearcher:
             
             # Обработка результатов
             if found_key:
-                self.handle_success(found_key)
+                print(f"\n{Colors.GREEN}>>> KEY FOUND! <<<{Colors.END}")
+                print(f"Private: {Colors.YELLOW}{found_key}{Colors.END}")
+                print(f"Address: {key_to_ripemd160(found_key).hex() if key_to_ripemd160(found_key) else 'Unknown'}")
+                
+                with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
+                    f.write(f"\n{time.ctime()}\n")
+                    f.write(f"Private: {found_key}\n")
+                    f.write(f"RIPEMD: {CONFIG['TARGET_RIPEMD'].hex()}\n")
             elif self.should_stop:
                 print(f"\n{Colors.YELLOW}Search stopped by user{Colors.END}")
             else:
@@ -308,40 +312,21 @@ class KeySearcher:
         finally:
             pool.close()
             pool.join()
-            self.finalize_search(shared_stats)
-
-    def handle_success(self, key):
-        """Обработка найденного ключа."""
-        print(f"\n{Colors.GREEN}>>> KEY FOUND! <<<{Colors.END}")
-        print(f"Private: {Colors.YELLOW}{key}{Colors.END}")
-        print(f"Address: {self.get_address(key)}")
-        
-        with open(CONFIG['FOUND_KEYS_FILE'], 'a') as f:
-            f.write(f"\n{time.ctime()}\n")
-            f.write(f"Private: {key}\n")
-            f.write(f"RIPEMD: {CONFIG['TARGET_RIPEMD'].hex()}\n")
-
-    def get_address(self, private_key_hex: str) -> str:
-        """Генерирует Bitcoin адрес из приватного ключа."""
-        ripemd = key_to_ripemd160(private_key_hex)
-        return ripemd.hex() if ripemd else "Unknown"
-
-    def finalize_search(self, stats):
-        """Финальная статистика."""
-        if not self.should_stop and self.current_key > CONFIG['START_KEY']:
-            atomic_save_checkpoint(self.current_key - 1, stats)
-        
-        elapsed = time.time() - self.start_time
-        total_checked = stats['keys_checked']
-        keys_per_sec = total_checked / max(elapsed, 1)
-        
-        print(f"\n{Colors.BLUE}=== Final Statistics ===")
-        print(f"Total keys checked: {total_checked:,}")
-        print(f"Total keys skipped: {stats['keys_skipped']:,}")
-        print(f"Total time: {elapsed/3600:.2f} hours")
-        print(f"Average speed: {self.format_speed(keys_per_sec)}")
-        print(f"Last checked key: {hex(self.current_key)}")
-        print(f"==================={Colors.END}")
+            
+            if not found_key and self.current_key > CONFIG['START_KEY']:
+                atomic_save_checkpoint(self.current_key - 1, shared_stats)
+            
+            elapsed = time.time() - self.start_time
+            total_checked = shared_stats['keys_checked']
+            keys_per_sec = total_checked / max(elapsed, 1)
+            
+            print(f"\n{Colors.BLUE}=== Final Statistics ===")
+            print(f"Total keys checked: {total_checked:,}")
+            print(f"Total keys skipped: {shared_stats['keys_skipped']:,}")
+            print(f"Total time: {elapsed/3600:.2f} hours")
+            print(f"Average speed: {self.format_speed(keys_per_sec)}")
+            print(f"Last checked key: {hex(self.current_key)}")
+            print(f"==================={Colors.END}")
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
