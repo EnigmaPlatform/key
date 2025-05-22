@@ -8,47 +8,42 @@ import math
 from collections import Counter
 from functools import lru_cache
 
-# Конфигурация
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")  # Замените на нужный хеш
-    START = 0x60102a304e0c796a80 # Начальный ключ (рекомендуемый для Puzzle)
-    END = 0x7fffffffffffffffff  # Конечный ключ
-    BATCH = 5_000_000           # Размер батча на ядро
-    UPDATE = 1_000_000          # Обновление статуса
+    TARGET = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")
+    START = 0x60102a304e0c796a80
+    END = 0x7fffffffffffffffff
+    BATCH = 5_000_000
+    UPDATE = 1_000_000
 
-# Быстрые проверки ключей
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
     part = key_hex[-16:]
-    # Проверка повторяющихся символов
     if len(set(part)) < 4:
         return True
-    # Проверка последовательностей
     for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i]) == 1 and
-           ord(part[i+2]) - ord(part[i+1]) == 1 and
-           ord(part[i+3]) - ord(part[i+2]) == 1):
+        if (ord(part[i+1]) - ord(part[i]) == 1 and \
+           ord(part[i+2]) - ord(part[i+1]) == 1 and \
+           ord(part[i+3]) - ord(part[i+2]) == 1:
             return True
     return False
 
-# Оптимизированное хеширование
 def key_to_hash(key_hex: str) -> bytes:
     try:
         priv = bytes.fromhex(key_hex)
         pub = coincurve.PublicKey.from_secret(priv).format(compressed=True)
-        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
+        return hashlib.new('ripemd160', hashlib.sha256(pub).digest())
     except:
         return b''
 
-# Рабочая функция для процессов
-def worker(start, end, target, result):
+def worker(start, end, target, result, last_key):
     found = None
     for key_int in range(start, end+1):
         key_hex = f"{key_int:064x}"
         if not is_trivial(key_hex[-16:]) and key_to_hash(key_hex) == target:
             found = key_hex
             break
+    last_key.value = end  # Сохраняем последний проверенный ключ
     if found:
         result['found'] = found
 
@@ -57,6 +52,7 @@ class Solver:
         self.current = Config.START
         self.stats = {'checked': 0, 'speed': 0}
         self.start_time = time.time()
+        self.last_key = multiprocessing.Value('Q', Config.START)
         signal.signal(signal.SIGINT, self.stop)
 
     def stop(self, *args):
@@ -69,7 +65,7 @@ class Solver:
         remaining = (Config.END - self.current) / max(self.stats['speed'], 1)
         print(f"\rChecked: {self.stats['checked']:,} | Speed: {self.stats['speed']/1e6:.2f}M/s | "
               f"Progress: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
-              f"ETA: {remaining/3600:.1f}h", end='')
+              f"ETA: {remaining/3600:.1f}h | Last: {hex(self.last_key.value)}", end='', flush=True)
 
     def run(self):
         print(f"Starting scan from {hex(Config.START)} to {hex(Config.END)}")
@@ -85,18 +81,15 @@ class Solver:
                 batch_size = Config.BATCH * multiprocessing.cpu_count()
                 batch_end = min(self.current + batch_size, Config.END)
                 
-                # Распределение задач
                 for i in range(multiprocessing.cpu_count()):
                     start = self.current + i*(batch_end-self.current)//multiprocessing.cpu_count()
                     end = start + (batch_end-self.current)//multiprocessing.cpu_count() - 1
                     if i == multiprocessing.cpu_count()-1:
                         end = batch_end
-                    tasks.append((start, end, Config.TARGET, result))
+                    tasks.append((start, end, Config.TARGET, result, self.last_key))
                 
-                # Параллельное выполнение
                 pool.starmap(worker, tasks)
                 
-                # Обновление статуса
                 self.stats['checked'] += batch_end - self.current + 1
                 self.current = batch_end + 1
                 self.status()
@@ -106,6 +99,7 @@ class Solver:
                     return
         
         print("\nScan completed - nothing found")
+        print(f"Last checked key: {hex(self.last_key.value)}")
 
     def found(self, key):
         print(f"\n\n!!! FOUND PRIVATE KEY !!!\n{key}")
