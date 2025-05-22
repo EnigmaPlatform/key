@@ -9,7 +9,7 @@ CONFIG = {
     'TARGET_RIPEMD': bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"),
     'LEADING_ZEROS': '0' * 46,
     'FIRST_CHAR': ['6', '7'],
-    'WORKERS': min(16, cpu_count()),
+    'WORKERS': max(16, cpu_count()),
     'REPORT_INTERVAL': 1_000_000,
     'TEST_KEY': "0000000000000000000000000000000000000000000000000000000000000001"
 }
