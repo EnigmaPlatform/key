@@ -4,8 +4,6 @@ import os
 import multiprocessing
 import coincurve
 import signal
-import math
-from collections import Counter
 from functools import lru_cache
 
 class Config:
@@ -13,8 +11,8 @@ class Config:
     TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
     START = 0x349b84b6431a3c4ef1
     END = 0x349b84b6431a6c4ef1
-    BATCH = 5_000
-    UPDATE = 10_000
+    BATCH = 50_000
+    UPDATE = 360_018  # Частота обновления статуса (каждые ~360k ключей)
 
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
@@ -22,9 +20,9 @@ def is_trivial(key_hex: str) -> bool:
     if len(set(part)) < 4:
         return True
     for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i]) == 1 and \
-           ord(part[i+2]) - ord(part[i+1]) == 1 and \
-           ord(part[i+3]) - ord(part[i+2])) == 1:
+        if (ord(part[i+1]) - ord(part[i]) == 1 and
+            ord(part[i+2]) - ord(part[i+1]) == 1 and
+            ord(part[i+3]) - ord(part[i+2]) == 1):
             return True
     return False
 
@@ -40,13 +38,13 @@ def worker(args):
     start, end, target = args
     found = None
     last_checked = start
-    for key_int in range(start, end+1):
+    for key_int in range(start, end + 1):
         key_hex = f"{key_int:064x}"
         last_checked = key_int
         if not is_trivial(key_hex[-16:]) and key_to_hash(key_hex) == target:
             found = key_hex
             break
-    return {'found': found, 'last': last_checked}
+    return {'found': found, 'last': last_checked, 'processed': end - start + 1}
 
 class Solver:
     def __init__(self):
@@ -55,6 +53,7 @@ class Solver:
         self.start_time = time.time()
         self.last_checked = Config.START
         signal.signal(signal.SIGINT, self.stop)
+        self.should_stop = False
 
     def stop(self, *args):
         print("\nStopping...")
@@ -63,7 +62,7 @@ class Solver:
     def status(self):
         elapsed = time.time() - self.start_time
         self.stats['speed'] = self.stats['checked'] / max(elapsed, 1)
-        remaining = (Config.END - self.current) / max(self.stats['speed'], 1)
+        remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1))
         
         print(f"\n=== Статистика ===")
         print(f"Проверено ключей: {self.stats['checked']:,}")
@@ -77,19 +76,19 @@ class Solver:
         print(f"Начало сканирования от {hex(Config.START)} до {hex(Config.END)}")
         print(f"Используется ядер: {multiprocessing.cpu_count()}")
         
-        self.should_stop = False
         last_status_time = time.time()
+        last_update_count = 0
         
         with multiprocessing.Pool() as pool:
             while self.current <= Config.END and not self.should_stop:
                 tasks = []
-                batch_size = Config.BATCH * multiprocessing.cpu_count()
-                batch_end = min(self.current + batch_size, Config.END)
+                batch_size = min(Config.BATCH * multiprocessing.cpu_count(), Config.END - self.current + 1)
+                batch_end = self.current + batch_size - 1
                 
                 for i in range(multiprocessing.cpu_count()):
-                    start = self.current + i*(batch_end-self.current)//multiprocessing.cpu_count()
-                    end = start + (batch_end-self.current)//multiprocessing.cpu_count() - 1
-                    if i == multiprocessing.cpu_count()-1:
+                    start = self.current + i * (batch_size // multiprocessing.cpu_count())
+                    end = start + (batch_size // multiprocessing.cpu_count()) - 1
+                    if i == multiprocessing.cpu_count() - 1:
                         end = batch_end
                     tasks.append((start, end, Config.TARGET))
                 
@@ -100,14 +99,15 @@ class Solver:
                         self.found(result['found'])
                         return
                     self.last_checked = max(self.last_checked, result['last'])
+                    self.stats['checked'] += result['processed']
                 
-                self.stats['checked'] += batch_end - self.current + 1
                 self.current = batch_end + 1
                 
-                if (self.stats['checked'] % Config.UPDATE == 0 or 
+                if (self.stats['checked'] - last_update_count >= Config.UPDATE or 
                     time.time() - last_status_time > 5):
                     self.status()
                     last_status_time = time.time()
+                    last_update_count = self.stats['checked']
         
         self.status()
         print("\nСканирование завершено - ключ не найден")
