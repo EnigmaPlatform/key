@@ -1,234 +1,209 @@
-import hashlib
+# -*- coding: utf-8 -*-
+import multiprocessing
 import time
 import os
-import multiprocessing
-import coincurve
-import signal
 import sys
-from functools import lru_cache
-from numba import jit
-import numpy as np
+import signal
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from Crypto.Hash import RIPEMD160, SHA256
+from base58 import b58decode_check
+import re
+import cython  # Импортируем Cython
+
+# Критически важные функции вынесены в отдельный Cython-модуль
+# Для этого создадим файл key_checks.pyx и скомпилируем его
+"""
+# key_checks.pyx
+import cython
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def is_valid_key(key_hex: str) -> cython.bint:
+    # Игнорируем ведущие нули (первые 46 символов)
+    significant_part = key_hex[46:]
+    
+    # 1. Проверка на ключи только из цифр или только из букв
+    if significant_part.isdigit() or significant_part.isalpha():
+        return False
+    
+    # 2. Проверка на более 4 повторяющихся символов подряд
+    cdef int i, count = 1
+    cdef char current = significant_part[0]
+    for i in range(1, len(significant_part)):
+        if significant_part[i] == current:
+            count += 1
+            if count > 4:
+                return False
+        else:
+            current = significant_part[i]
+            count = 1
+    
+    return True
+"""
+
+# Импортируем скомпилированную Cython-функцию
+from key_checks import is_valid_key
 
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = None  # Will be set in __init__
-    START = 0x349b84b643113c4ef1
+    TARGET_HASH = None
+    START = 0x349b84b6431a5c4ef1
     END = 0x349b84b6431a6c4ef1
-    BATCH = 50_000
-    STATS_INTERVAL = 1_000_000  # Increased for better performance tracking
-    PROGRESS_INTERVAL = 10
-    FILTER_TRIVIAL = True  # Enable/disable trivial key filtering
-    USE_NUMBA = True  # Enable/disable Numba acceleration
+    CHUNK_SIZE = 100000  # Увеличенный размер блока
+    THREADS = multiprocessing.cpu_count()
 
-def address_to_hash(address: str) -> bytes:
-    """Convert Bitcoin address to RIPEMD-160 hash"""
-    from base58 import b58decode_check
-    return b58decode_check(address)[1:]
-
-@lru_cache(maxsize=1<<20)
-def is_trivial(key_hex: str) -> bool:
-    """Improved trivial key detection with more patterns"""
-    part = key_hex[-16:]
-    
-    # Check for low character diversity
-    if len(set(part)) < 4:
-        return True
-    
-    # Check for sequential patterns (like 1234, abcd)
-    for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i]) == 1 and 
-            ord(part[i+2]) - ord(part[i+1]) == 1 and 
-            ord(part[i+3]) - ord(part[i+2]) == 1):
-            return True
-    
-    # Check for repeated patterns (like 0101, abab)
-    if len(part) >= 4 and part[0] == part[2] and part[1] == part[3]:
-        return True
-    
-    # Check for common weak patterns found in winning keys
-    if part.endswith(('0', '2', '4', '6', '8', 'a', 'c', 'e')):
-        return True
-        
-    return False
-
-@jit(nopython=True)
-def numba_is_potential(key_int: int) -> bool:
-    """Numba-accelerated potential key check"""
-    # Convert to hex string manually for Numba compatibility
-    hex_chars = "0123456789abcdef"
-    key_hex = ""
-    for _ in range(16):
-        key_hex = hex_chars[key_int & 0xf] + key_hex
-        key_int >>= 4
-    
-    # Simple checks that Numba can handle
-    # 1. Check last character is odd
-    last_char = key_hex[-1]
-    if last_char in ('0', '2', '4', '6', '8', 'a', 'c', 'e'):
-        return False
-    
-    # 2. Check for sequential patterns
-    for i in range(13):
-        if (ord(key_hex[i+1]) - ord(key_hex[i]) == 1 and
-            ord(key_hex[i+2]) - ord(key_hex[i+1]) == 1 and
-            ord(key_hex[i+3]) - ord(key_hex[i+2]) == 1):
-            return False
-    
-    return True
-
-def key_to_hash(key_hex: str) -> bytes:
-    """Optimized key to hash conversion"""
+def process_key(key: int) -> tuple:
+    """Оптимизированная обработка одного ключа"""
     try:
-        priv = bytes.fromhex(key_hex)
-        pub = coincurve.PublicKey.from_secret(priv).format(compressed=True)
-        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
-    except Exception:
-        return b''
+        key_hex = f"{key:064x}"
+        
+        if not is_valid_key(key_hex):
+            return (None, None, 0)
+        
+        key_bytes = key.to_bytes(32, 'big')
+        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+        h = SHA256.new(pub_key).digest()
+        h = RIPEMD160.new(h).digest()
+        return (key_hex, h, 1)
+    except:
+        return (None, None, 0)
 
-def worker(args):
-    """Optimized worker function with batch processing"""
-    start, end, target = args
+def worker(start: int, end: int) -> dict:
+    """Оптимизированная рабочая функция"""
     found = None
-    last_checked = start
     processed = 0
-    batch_results = []
+    valid = 0
+    last_checked = start
     
-    # Pre-calculate the target as numpy array for faster comparison
-    target_np = np.frombuffer(target, dtype=np.uint8)
+    results = []
+    batch_size = 1000  # Размер мини-пакета для обработки
     
-    for key_int in range(start, end + 1):
-        if Config.FILTER_TRIVIAL:
-            if Config.USE_NUMBA:
-                if not numba_is_potential(key_int):
-                    processed += 1
-                    continue
-            else:
-                key_hex = f"{key_int:064x}"
-                if is_trivial(key_hex[-16:]):
-                    processed += 1
-                    continue
+    for batch_start in range(start, end + 1, batch_size):
+        batch_end = min(batch_start + batch_size - 1, end)
         
-        key_hex = f"{key_int:064x}"
-        last_checked = key_int
-        processed += 1
+        # Обрабатываем мини-пакет
+        for key in range(batch_start, batch_end + 1):
+            key_hex, h, is_valid = process_key(key)
+            processed += 1
+            valid += is_valid
+            
+            if h is not None and h == Config.TARGET_HASH:
+                found = key_hex
+                break
+                
+            last_checked = key
         
-        # Batch processing for better performance
-        batch_results.append(key_hex)
-        if len(batch_results) >= 100:  # Process in batches of 100
-            for k in batch_results:
-                h = key_to_hash(k)
-                if np.array_equal(np.frombuffer(h, dtype=np.uint8), target_np):
-                    found = k
-                    break
-            batch_results = []
-            if found:
-                break
+        if found:
+            break
     
-    # Process remaining keys in batch
-    if not found and batch_results:
-        for k in batch_results:
-            h = key_to_hash(k)
-            if np.array_equal(np.frombuffer(h, dtype=np.uint8), target_np):
-                found = k
-                break
-    
-    return {'found': found, 'last': last_checked, 'processed': processed}
+    return {
+        'found': found,
+        'processed': processed,
+        'valid': valid,
+        'last_checked': last_checked
+    }
 
-class Solver:
+class KeySolver:
     def __init__(self, target_address=None):
         self.current = Config.START
         self.stats = {
-            'checked': 0,
-            'total_checked': 0,
+            'total': 0,
+            'valid': 0,
             'speed': 0,
-            'last_speed_time': time.time(),
-            'last_speed_count': 0,
-            'potential_keys': 0
+            'start_time': time.time(),
+            'last_check': time.time(),
+            'last_key': Config.START
         }
-        self.start_time = time.time()
-        self.last_checked = Config.START
-        self.last_print_time = time.time()
-        signal.signal(signal.SIGINT, self.stop)
         self.should_stop = False
+        signal.signal(signal.SIGINT, self.signal_handler)
         
-        # Set target hash
-        if target_address:
-            Config.TARGET = address_to_hash(target_address)
-        else:
-            Config.TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
+        Config.TARGET_HASH = (b58decode_check(target_address)[1:] if target_address 
+                            else bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10"))
 
-    def stop(self, *args):
-        print("\nStopping...")
+    def signal_handler(self, signum, frame):
+        print("\nПолучен сигнал прерывания, завершаем работу...")
         self.should_stop = True
 
-    def print_progress(self, force_print=False):
-        now = time.time()
-        elapsed = now - self.start_time
-        time_since_last_print = now - self.last_print_time
+    def print_progress(self):
+        current_time = time.time()
+        elapsed = current_time - self.stats['start_time']
         
-        # Update speed every 5 seconds
-        if now - self.stats['last_speed_time'] >= 5:
-            self.stats['speed'] = (self.stats['total_checked'] - self.stats['last_speed_count']) / \
-                                 (now - self.stats['last_speed_time'])
-            self.stats['last_speed_time'] = now
-            self.stats['last_speed_count'] = self.stats['total_checked']
+        if current_time - self.stats['last_check'] >= 5:
+            self.stats['speed'] = self.stats['total'] / elapsed
+            self.stats['last_check'] = current_time
         
-        if force_print or time_since_last_print >= Config.PROGRESS_INTERVAL:
-            remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1e-9))
-            
-            print(f"\n[Progress] Checked: {self.stats['total_checked']:,} | "
-                  f"Potential: {self.stats['potential_keys']:,} | "
-                  f"Speed: {self.stats['speed']/1e6:.2f} Mkeys/sec | "
-                  f"Progress: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
-                  f"Last key: {hex(self.last_checked)} | "
-                  f"ETA: {remaining/3600:.1f} hours")
-            
-            self.last_print_time = now
+        remaining = max(0, Config.END - self.stats['last_key'])
+        eta = remaining / max(self.stats['speed'], 1)
+        
+        print(f"\n[Прогресс] Всего: {self.stats['total']:,} | "
+              f"Действительных: {self.stats['valid']:,} | "
+              f"Скорость: {self.stats['speed']:,.0f} key/sec | "
+              f"Прогресс: {100*(self.stats['last_key']-Config.START)/(Config.END-Config.START):.2f}% | "
+              f"Последний: {hex(self.stats['last_key'])} | "
+              f"Осталось: {eta/3600:.1f} ч")
 
     def run(self):
-        print(f"Starting scan from {hex(Config.START)} to {hex(Config.END)}")
-        print(f"Target hash: {Config.TARGET.hex()}")
-        print(f"Using cores: {multiprocessing.cpu_count()}")
-        print(f"Using Numba: {Config.USE_NUMBA}")
-        print(f"Filtering trivial keys: {Config.FILTER_TRIVIAL}")
+        print(f"Сканирование: {hex(Config.START)} - {hex(Config.END)}")
+        print(f"Целевой хеш: {Config.TARGET_HASH.hex()}")
+        print(f"Потоков: {Config.THREADS}")
+        print("Фильтрация:")
+        print("- Макс 4 повторяющихся символа подряд (исключая 46 ведущих нулей)")
+        print("- Не только цифры или только буквы")
         
-        with multiprocessing.Pool() as pool:
-            while self.current <= Config.END and not self.should_stop:
-                tasks = []
-                batch_size = min(Config.BATCH * multiprocessing.cpu_count(), Config.END - self.current + 1)
-                batch_end = self.current + batch_size - 1
+        try:
+            with ProcessPoolExecutor(max_workers=Config.THREADS) as executor:
+                futures = []
                 
-                for i in range(multiprocessing.cpu_count()):
-                    start = self.current + i * (batch_size // multiprocessing.cpu_count())
-                    end = start + (batch_size // multiprocessing.cpu_count()) - 1
-                    if i == multiprocessing.cpu_count() - 1:
-                        end = batch_end
-                    tasks.append((start, end, Config.TARGET))
+                while self.current <= Config.END and not self.should_stop:
+                    chunk_end = min(self.current + Config.CHUNK_SIZE - 1, Config.END)
+                    futures.append(executor.submit(worker, self.current, chunk_end))
+                    self.current = chunk_end + 1
+                    
+                    # Обрабатываем завершенные задачи
+                    while futures:
+                        done, _ = as_completed(futures), []
+                        for future in done:
+                            result = future.result()
+                            
+                            self.stats['total'] += result['processed']
+                            self.stats['valid'] += result['valid']
+                            self.stats['last_key'] = max(self.stats['last_key'], result['last_checked'])
+                            
+                            if result['found']:
+                                self.key_found(result['found'])
+                                return
+                                
+                            futures.remove(future)
+                            self.print_progress()
+                            break
                 
-                results = pool.map(worker, tasks)
-                
-                for result in results:
+                # Завершение оставшихся задач
+                for future in as_completed(futures):
+                    if self.should_stop:
+                        break
+                        
+                    result = future.result()
+                    self.stats['total'] += result['processed']
+                    self.stats['valid'] += result['valid']
+                    self.stats['last_key'] = max(self.stats['last_key'], result['last_checked'])
+                    
                     if result['found']:
-                        self.found(result['found'])
+                        self.key_found(result['found'])
                         return
-                    self.last_checked = max(self.last_checked, result['last'])
-                    self.stats['checked'] = result['processed']
-                    self.stats['total_checked'] += result['processed']
-                    # Count potential keys (those that passed filters)
-                    self.stats['potential_keys'] += result['processed']
-                
-                self.current = batch_end + 1
-                self.print_progress()
+                        
+                    self.print_progress()
+                    
+        except Exception as e:
+            print(f"\nОшибка: {str(e)}")
         
-        self.print_progress(force_print=True)
-        print("\nScan completed - key not found")
+        print("\nЗавершено" + (" (прервано)" if self.should_stop else " - ключ не найден"))
 
-    def found(self, key):
-        print(f"\n\n!!! KEY FOUND !!!")
-        print(f"Private key: {key}")
-        print(f"Hash: {key_to_hash(key).hex()}")
+    def key_found(self, key):
+        print(f"\n\n!!! НАЙДЕН КЛЮЧ !!!")
+        print(f"Приватный ключ: {key}")
+        print(f"Хеш: {Config.TARGET_HASH.hex()}")
         
-        with open(Config.FOUND_FILE, 'a') as f:
+        with open(Config.FOUND_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{time.ctime()}\n{key}\n")
 
 if __name__ == "__main__":
@@ -236,11 +211,5 @@ if __name__ == "__main__":
         multiprocessing.set_start_method('fork')
     
     target_address = sys.argv[1] if len(sys.argv) > 1 else None
-    solver = Solver(target_address)
-    
-    # Warm up Numba
-    if Config.USE_NUMBA:
-        print("Warming up Numba...")
-        numba_is_potential(0x123456789abcdef0)
-    
+    solver = KeySolver(target_address)
     solver.run()
