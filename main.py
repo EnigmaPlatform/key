@@ -9,7 +9,7 @@ from functools import lru_cache
 
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = None  # Будет установлен в __init__
+    TARGET = None  # Will be set in __init__
     START = 0x349b84b6431a3c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
@@ -27,9 +27,9 @@ def is_trivial(key_hex: str) -> bool:
     if len(set(part)) < 4:
         return True
     for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i]) == 1 and \
-           ord(part[i+2]) - ord(part[i+1]) == 1 and \
-           ord(part[i+3]) - ord(part[i+2]) == 1:
+        if (ord(part[i+1]) - ord(part[i]) == 1 and 
+            ord(part[i+2]) - ord(part[i+1]) == 1 and 
+            ord(part[i+3]) - ord(part[i+2]) == 1):
             return True
     return False
 
@@ -72,7 +72,7 @@ class Solver:
         signal.signal(signal.SIGINT, self.stop)
         self.should_stop = False
         
-        # Установка целевого хеша
+        # Set target hash
         if target_address:
             Config.TARGET = address_to_hash(target_address)
         else:
@@ -99,18 +99,18 @@ class Solver:
             
             remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1e-9))
             
-            print(f"\n[Прогресс] Проверено: {self.stats['total_checked']:,} | "
-                  f"Скорость: {self.stats['speed']/1e6:.2f} млн/сек | "
-                  f"Прогресс: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
-                  f"Последний ключ: {hex(self.last_checked)} | "
-                  f"Осталось: {remaining/3600:.1f} ч")
+            print(f"\n[Progress] Checked: {self.stats['total_checked']:,} | "
+                  f"Speed: {self.stats['speed']/1e6:.2f} Mkeys/sec | "
+                  f"Progress: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
+                  f"Last key: {hex(self.last_checked)} | "
+                  f"ETA: {remaining/3600:.1f} hours")
             
             self.last_print_time = now
 
     def run(self):
-        print(f"Начало сканирования от {hex(Config.START)} до {hex(Config.END)}")
-        print(f"Целевой хеш: {Config.TARGET.hex()}")
-        print(f"Используется ядер: {multiprocessing.cpu_count()}")
+        print(f"Starting scan from {hex(Config.START)} to {hex(Config.END)}")
+        print(f"Target hash: {Config.TARGET.hex()}")
+        print(f"Using cores: {multiprocessing.cpu_count()}")
         
         with multiprocessing.Pool() as pool:
             while self.current <= Config.END and not self.should_stop:
@@ -139,12 +139,12 @@ class Solver:
                 self.print_progress()
         
         self.print_progress(force_print=True)
-        print("\nСканирование завершено - ключ не найден")
+        print("\nScan completed - key not found")
 
     def found(self, key):
-        print(f"\n\n!!! КЛЮЧ НАЙДЕН !!!")
-        print(f"Приватный ключ: {key}")
-        print(f"Хеш: {key_to_hash(key).hex()}")
+        print(f"\n\n!!! KEY FOUND !!!")
+        print(f"Private key: {key}")
+        print(f"Hash: {key_to_hash(key).hex()}")
         
         with open(Config.FOUND_FILE, 'a') as f:
             f.write(f"{time.ctime()}\n{key}\n")
