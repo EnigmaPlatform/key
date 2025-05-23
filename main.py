@@ -2,18 +2,17 @@
 import multiprocessing
 import hashlib
 import coincurve
-from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 import sys
 
 # Конфигурация
-TARGET_HASH = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-START_KEY = 0x349b84b6431a0c4ef1
-END_KEY = 0x349b84b6431a614ef1
+TARGET_HASH = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")
+START_KEY = 0x60102a304e0c796a80
+END_KEY = 0x80102a304e0c796a80
 CHUNK_SIZE = 100000
-THREADS = multiprocessing.cpu_count()
-REPORT_INTERVAL = 10_000_000  # Отчет каждые 10 млн ключей
+THREADS = max(1, int(multiprocessing.cpu_count() * 1.5))  # Ядра * 1.5
+REPORT_INTERVAL = 500_000  # Отчет каждые 10 млн ключей
 
 def process_chunk(start, end, result_queue):
     """Обработка блока ключей с отправкой прогресса"""
@@ -28,7 +27,6 @@ def process_chunk(start, end, result_queue):
                 result_queue.put(('found', key_hex))
                 return
                 
-            # Отправляем прогресс каждые 1000 ключей
             if key_int % 1000 == 0:
                 result_queue.put(('progress', key_int))
                 
@@ -41,20 +39,18 @@ def format_key(key_int):
     return f"{key_int:064x}"
 
 def find_key_parallel():
-    """Параллельный поиск с обновляемым прогрессом"""
-    print(f"\n⚡ Запуск поиска с {THREADS} ядрами")
+    """Параллельный поиск с улучшенным выводом информации"""
+    print(f"\n⚡ Запуск поиска с {THREADS} процессами")
     print(f"🔍 Диапазон: {hex(START_KEY)}-{hex(END_KEY)}")
     print(f"🎯 Целевой хеш: {TARGET_HASH.hex()}")
-    total_keys = END_KEY - START_KEY + 1
-    print(f"Всего ключей: {total_keys:,}\n")
+    print("Подбор начался...")
 
     manager = multiprocessing.Manager()
     result_queue = manager.Queue()
     start_time = time.time()
     last_report_key = START_KEY
     found_key = None
-    last_progress_time = start_time
-    last_progress_count = 0
+    last_report_time = start_time
 
     # Создаем и запускаем процессы
     with ProcessPoolExecutor(max_workers=THREADS) as executor:
@@ -62,36 +58,26 @@ def find_key_parallel():
                  for s in range(START_KEY, END_KEY + 1, CHUNK_SIZE)]
         futures = [executor.submit(process_chunk, start, end, result_queue) 
                   for start, end in chunks]
-
-        # Настраиваем прогресс-бар
-        progress_bar = tqdm(total=total_keys, desc="Прогресс", unit="key", 
-                          bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
         
         while not found_key and any(not f.done() for f in futures):
             while not result_queue.empty():
                 msg_type, data = result_queue.get()
                 
                 if msg_type == 'progress':
-                    # Обновляем прогресс-бар
-                    progress_bar.update(data - progress_bar.n)
-                    
-                    # Рассчитываем текущую скорость
-                    current_time = time.time()
-                    time_diff = current_time - last_progress_time
-                    keys_diff = data - last_progress_count
-                    if time_diff > 0:
-                        current_speed = keys_diff / time_diff
-                    else:
-                        current_speed = 0
-                    
-                    # Обновляем строку с последним ключом
+                    # Выводим отчет каждые 10 млн ключей
                     if data - last_report_key >= REPORT_INTERVAL:
-                        sys.stdout.write('\r' + ' ' * 100 + '\r')  # Очищаем строку
-                        sys.stdout.write(f"Последний ключ: {format_key(data)} | Скорость: {current_speed:,.0f} keys/s")
-                        sys.stdout.flush()
+                        current_time = time.time()
+                        time_diff = current_time - last_report_time
+                        speed = REPORT_INTERVAL / max(1, time_diff)
+                        
+                        # Очищаем предыдущий вывод и выводим новую информацию
+                        sys.stdout.write('\033[F\033[K' * 2)  # Перемещаемся на 2 строки вверх и очищаем
+                        print(f"Скорость: {speed:,.0f} keys/sec")
+                        print(f"Последний ключ: {format_key(data)}")
+                        
+                        # Обновляем счетчики
                         last_report_key = data
-                        last_progress_time = current_time
-                        last_progress_count = data
+                        last_report_time = current_time
                         
                 elif msg_type == 'found':
                     found_key = data
@@ -99,15 +85,10 @@ def find_key_parallel():
                         f.cancel()
                     break
 
-    # Очищаем строку с последним ключом
-    sys.stdout.write('\r' + ' ' * 100 + '\r\n')
-    progress_bar.close()
-
     # Вывод результатов
     elapsed = time.time() - start_time
-    print(f"\n{'='*50}")
-    print(f"Всего времени: {elapsed:.2f} сек")
-    print(f"Средняя скорость: {total_keys/max(1, elapsed):,.0f} keys/sec")
+    print(f"\nВсего времени: {elapsed:.2f} сек")
+    print(f"Средняя скорость: {(END_KEY-START_KEY+1)/max(1, elapsed):,.0f} keys/sec")
     
     if found_key:
         print(f"\n🎉 КЛЮЧ НАЙДЕН!")
