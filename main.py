@@ -11,7 +11,7 @@ from functools import lru_cache
 class Config:
     FOUND_FILE = "found.txt"
     TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-    START = 0x349b84b6431a4c4ef1
+    START = 0x349b84b6431a3c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 5_000
     UPDATE = 10_000
