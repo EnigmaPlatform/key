@@ -4,16 +4,22 @@ import os
 import multiprocessing
 import coincurve
 import signal
+import sys
 from functools import lru_cache
 
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
+    TARGET = None  # Будет установлен в __init__
     START = 0x349b84b6431a3c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
-    STATS_INTERVAL = 1_000_000  # Выводить статистику каждые 1 млн ключей
-    PROGRESS_INTERVAL = 10_000   # Минимальный интервал между выводами прогресса (10 сек)
+    STATS_INTERVAL = 1_000_000
+    PROGRESS_INTERVAL = 10
+
+def address_to_hash(address: str) -> bytes:
+    """Convert Bitcoin address to RIPEMD-160 hash"""
+    from base58 import b58decode_check
+    return b58decode_check(address)[1:]
 
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
@@ -21,9 +27,9 @@ def is_trivial(key_hex: str) -> bool:
     if len(set(part)) < 4:
         return True
     for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i]) == 1 and
-            ord(part[i+2]) - ord(part[i+1]) == 1 and
-            ord(part[i+3]) - ord(part[i+2]) == 1):
+        if (ord(part[i+1]) - ord(part[i]) == 1 and \
+           ord(part[i+2]) - ord(part[i+1]) == 1 and \
+           ord(part[i+3]) - ord(part[i+2]) == 1:
             return True
     return False
 
@@ -31,8 +37,8 @@ def key_to_hash(key_hex: str) -> bytes:
     try:
         priv = bytes.fromhex(key_hex)
         pub = coincurve.PublicKey.from_secret(priv).format(compressed=True)
-        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()
-    except:
+        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
+    except Exception:
         return b''
 
 def worker(args):
@@ -51,7 +57,7 @@ def worker(args):
     return {'found': found, 'last': last_checked, 'processed': processed}
 
 class Solver:
-    def __init__(self):
+    def __init__(self, target_address=None):
         self.current = Config.START
         self.stats = {
             'checked': 0,
@@ -65,6 +71,12 @@ class Solver:
         self.last_print_time = time.time()
         signal.signal(signal.SIGINT, self.stop)
         self.should_stop = False
+        
+        # Установка целевого хеша
+        if target_address:
+            Config.TARGET = address_to_hash(target_address)
+        else:
+            Config.TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
 
     def stop(self, *args):
         print("\nStopping...")
@@ -75,22 +87,17 @@ class Solver:
         elapsed = now - self.start_time
         time_since_last_print = now - self.last_print_time
         
-        # Обновляем скорость каждые 5 секунд
         if now - self.stats['last_speed_time'] >= 5:
             self.stats['speed'] = (self.stats['total_checked'] - self.stats['last_speed_count']) / \
                                  (now - self.stats['last_speed_time'])
             self.stats['last_speed_time'] = now
             self.stats['last_speed_count'] = self.stats['total_checked']
         
-        # Печатаем прогресс если:
-        # 1) Прошло больше Config.PROGRESS_INTERVAL секунд
-        # 2) Проверено больше Config.STATS_INTERVAL ключей
-        # 3) Принудительный вывод (force_print)
         if force_print or time_since_last_print >= Config.PROGRESS_INTERVAL or \
            self.stats['total_checked'] // Config.STATS_INTERVAL != \
            (self.stats['total_checked'] - self.stats['checked']) // Config.STATS_INTERVAL:
             
-            remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1e-9)
+            remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1e-9))
             
             print(f"\n[Прогресс] Проверено: {self.stats['total_checked']:,} | "
                   f"Скорость: {self.stats['speed']/1e6:.2f} млн/сек | "
@@ -102,6 +109,7 @@ class Solver:
 
     def run(self):
         print(f"Начало сканирования от {hex(Config.START)} до {hex(Config.END)}")
+        print(f"Целевой хеш: {Config.TARGET.hex()}")
         print(f"Используется ядер: {multiprocessing.cpu_count()}")
         
         with multiprocessing.Pool() as pool:
@@ -144,4 +152,6 @@ class Solver:
 if __name__ == "__main__":
     if os.name == 'posix':
         multiprocessing.set_start_method('fork')
-    Solver().run()
+    
+    target_address = sys.argv[1] if len(sys.argv) > 1 else None
+    Solver(target_address).run()
