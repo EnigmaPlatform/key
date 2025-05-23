@@ -12,7 +12,7 @@ class Config:
     START = 0x349b84b643113c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
-    STATS_INTERVAL = 10_000_000  # Обновление статистики каждые 10 млн ключей
+    STATS_INTERVAL = 10_000 # Обновление статистики каждые 10 млн ключей
 
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
