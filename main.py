@@ -10,11 +10,11 @@ from functools import lru_cache
 
 class Config:
     FOUND_FILE = "found.txt"
-    TARGET = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")
-    START = 0x60102a304e0c796a80
-    END = 0x7fffffffffffffffff
-    BATCH = 5_000_000
-    UPDATE = 1_000_000
+    TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")  # Замените на нужный хеш
+    START = 0x349b84b6431a6c4ef1  # Начальный ключ
+    END = 0x349b84b6431a5c4ef1    # Конечный ключ
+    BATCH = 5_000             # Размер батча на ядро
+    UPDATE = 1_000_000            # Частота обновления статуса
 
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
@@ -36,14 +36,16 @@ def key_to_hash(key_hex: str) -> bytes:
     except:
         return b''
 
-def worker(start, end, target, result, last_key):
+def worker(start, end, target, result, last_checked):
     found = None
     for key_int in range(start, end+1):
         key_hex = f"{key_int:064x}"
         if not is_trivial(key_hex[-16:]) and key_to_hash(key_hex) == target:
             found = key_hex
             break
-    last_key.value = end  # Сохраняем последний проверенный ключ
+    # Обновляем последний проверенный ключ
+    with last_checked.get_lock():
+        last_checked.value = max(last_checked.value, end)
     if found:
         result['found'] = found
 
@@ -52,7 +54,7 @@ class Solver:
         self.current = Config.START
         self.stats = {'checked': 0, 'speed': 0}
         self.start_time = time.time()
-        self.last_key = multiprocessing.Value('Q', Config.START)
+        self.last_checked = multiprocessing.Value('Q', Config.START)
         signal.signal(signal.SIGINT, self.stop)
 
     def stop(self, *args):
@@ -63,17 +65,27 @@ class Solver:
         elapsed = time.time() - self.start_time
         self.stats['speed'] = self.stats['checked'] / max(elapsed, 1)
         remaining = (Config.END - self.current) / max(self.stats['speed'], 1)
-        print(f"\rChecked: {self.stats['checked']:,} | Speed: {self.stats['speed']/1e6:.2f}M/s | "
-              f"Progress: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
-              f"ETA: {remaining/3600:.1f}h | Last: {hex(self.last_key.value)}", end='', flush=True)
+        
+        # Получаем последний проверенный ключ
+        with self.last_checked.get_lock():
+            last_key = self.last_checked.value
+        
+        print(f"\n=== Статистика ===")
+        print(f"Проверено ключей: {self.stats['checked']:,}")
+        print(f"Скорость: {self.stats['speed']/1e6:.2f} млн/сек")
+        print(f"Прогресс: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}%")
+        print(f"Последний ключ: {hex(last_key)}")
+        print(f"Завершение через: {remaining/3600:.1f} часов")
+        print(f"==================")
 
     def run(self):
-        print(f"Starting scan from {hex(Config.START)} to {hex(Config.END)}")
-        print(f"Using {multiprocessing.cpu_count()} cores")
+        print(f"Начало сканирования от {hex(Config.START)} до {hex(Config.END)}")
+        print(f"Используется ядер: {multiprocessing.cpu_count()}")
         
         manager = multiprocessing.Manager()
         result = manager.dict()
         self.should_stop = False
+        last_status_time = time.time()
         
         with multiprocessing.Pool() as pool:
             while self.current <= Config.END and not self.should_stop:
@@ -86,25 +98,40 @@ class Solver:
                     end = start + (batch_end-self.current)//multiprocessing.cpu_count() - 1
                     if i == multiprocessing.cpu_count()-1:
                         end = batch_end
-                    tasks.append((start, end, Config.TARGET, result, self.last_key))
+                    tasks.append((start, end, Config.TARGET, result, self.last_checked))
                 
                 pool.starmap(worker, tasks)
                 
                 self.stats['checked'] += batch_end - self.current + 1
                 self.current = batch_end + 1
-                self.status()
+                
+                # Выводим статус каждые UPDATE ключей или каждые 60 секунд
+                if (self.stats['checked'] % Config.UPDATE == 0 or 
+                    time.time() - last_status_time > 60):
+                    self.status()
+                    last_status_time = time.time()
                 
                 if 'found' in result:
                     self.found(result['found'])
                     return
         
-        print("\nScan completed - nothing found")
-        print(f"Last checked key: {hex(self.last_key.value)}")
+        self.status()
+        print("\nСканирование завершено - ключ не найден")
 
     def found(self, key):
-        print(f"\n\n!!! FOUND PRIVATE KEY !!!\n{key}")
+        print(f"\n\n!!! КЛЮЧ НАЙДЕН !!!")
+        print(f"Приватный ключ: {Colors.YELLOW}{key}{Colors.END}")
+        print(f"Хеш: {key_to_hash(key).hex()}")
+        
         with open(Config.FOUND_FILE, 'a') as f:
             f.write(f"{time.ctime()}\n{key}\n")
+
+class Colors:
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    END = '\033[0m'
 
 if __name__ == "__main__":
     if os.name == 'posix':
