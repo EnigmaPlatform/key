@@ -1,201 +1,135 @@
 # -*- coding: utf-8 -*-
 import multiprocessing
-import time
-import os
-import sys
-import signal
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from Crypto.Hash import RIPEMD160, SHA256
-from base58 import b58decode_check
-import re
+import hashlib
 import coincurve
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
+import sys
 
-class Config:
-    FOUND_FILE = "found.txt"
-    LOG_FILE = "scan.log"
-    TARGET_HASH = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-    START = 0x349b84b6431a6c4ef1
-    END = 0x349b84b6431a614ef1 + 1  # Добавляем +1 чтобы включить последний ключ
-    CHUNK_SIZE = 50000
-    THREADS = multiprocessing.cpu_count()
+# Конфигурация
+TARGET_HASH = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
+START_KEY = 0x349b84b6431a0c4ef1
+END_KEY = 0x349b84b6431a614ef1
+CHUNK_SIZE = 100000
+THREADS = multiprocessing.cpu_count()
+REPORT_INTERVAL = 10_000_000  # Отчет каждые 10 млн ключей
 
-def is_valid_key(key_hex: str) -> bool:
-    """Проверка ключа по всем критериям"""
-    significant_part = key_hex[46:]  # Игнорируем 46 ведущих нулей
-    
-    # 1. Не только цифры или только буквы
-    if significant_part.isdigit() or significant_part.isalpha():
-        return False
-    
-    # 2. Не более 4 одинаковых символов подряд
-    if re.search(r'(.)\1{4}', significant_part):
-        return False
-    
-    return True
-
-def key_to_hash(key: int) -> tuple:
-    """Оптимизированное преобразование ключа в хеш"""
-    try:
-        key_hex = f"{key:064x}"
-        
-        if not is_valid_key(key_hex):
-            return (None, None)
-        
-        key_bytes = bytes.fromhex(key_hex)
-        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
-        h = RIPEMD160.new(SHA256.new(pub_key).digest()).digest()
-        return (key_hex, h)
-    except Exception as e:
-        return (None, None)
-
-def worker(start: int, end: int) -> dict:
-    """Рабочая функция с проверкой каждого ключа"""
-    found = None
-    processed = 0
-    valid = 0
-    last_checked = start
-    
-    for key in range(start, end):
-        key_hex, h = key_to_hash(key)
-        processed += 1
-        
-        if h is not None:
-            valid += 1
-            if h == Config.TARGET_HASH:
-                found = key_hex
-                break
-        
-        last_checked = key
-    
-    return {
-        'found': found,
-        'processed': processed,
-        'valid': valid,
-        'last_checked': last_checked
-    }
-
-class KeySolver:
-    def __init__(self):
-        self.current = Config.START
-        self.stats = {
-            'total': 0,
-            'valid': 0,
-            'speed': 0,
-            'start_time': time.time(),
-            'last_check': time.time(),
-            'last_key': Config.START
-        }
-        self.should_stop = False
-        signal.signal(signal.SIGINT, self.signal_handler)
-        
-        # Очищаем файлы логов
-        open(Config.FOUND_FILE, 'w').close()
-        open(Config.LOG_FILE, 'w').close()
-        
-        self.log(f"Начало сканирования: {hex(Config.START)} - {hex(Config.END-1)}")
-        self.log(f"Целевой хеш: {Config.TARGET_HASH.hex()}")
-        self.log(f"Всего ключей: {Config.END - Config.START:,}")
-        self.log(f"Потоков: {Config.THREADS}")
-
-    def log(self, message):
-        with open(Config.LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{time.ctime()} - {message}\n")
-
-    def signal_handler(self, signum, frame):
-        print("\nПолучен сигнал прерывания, завершаем работу...")
-        self.should_stop = True
-        self.log("Сканирование прервано пользователем")
-
-    def print_progress(self):
-        current_time = time.time()
-        elapsed = current_time - self.stats['start_time']
-        
-        if current_time - self.stats['last_check'] >= 5:
-            self.stats['speed'] = self.stats['total'] / elapsed
-            self.stats['last_check'] = current_time
-        
-        remaining = max(0, Config.END - self.stats['last_key'])
-        eta = remaining / max(self.stats['speed'], 1)
-        
-        progress = 100*(self.stats['last_key']-Config.START)/(Config.END-Config.START)
-        
-        print(f"\n[Прогресс] Всего: {self.stats['total']:,} | "
-              f"Действительных: {self.stats['valid']:,} | "
-              f"Скорость: {self.stats['speed']:,.0f} key/sec | "
-              f"Прогресс: {progress:.2f}% | "
-              f"Последний: {hex(self.stats['last_key'])} | "
-              f"Осталось: {eta/3600:.1f} ч")
-
-    def run(self):
-        print(f"Сканирование диапазона: {hex(Config.START)} - {hex(Config.END-1)}")
-        print(f"Целевой хеш: {Config.TARGET_HASH.hex()}")
-        print(f"Потоков: {Config.THREADS}")
-        print("Критерии фильтрации:")
-        print("- Не более 4 одинаковых символов подряд (исключая 46 ведущих нулей)")
-        print("- Не только цифры или только буквы")
-        
+def process_chunk(start, end, result_queue):
+    """Обработка блока ключей с отправкой прогресса"""
+    for key_int in range(start, end + 1):
         try:
-            with ProcessPoolExecutor(max_workers=Config.THREADS) as executor:
-                futures = []
+            key_hex = f"{key_int:064x}"
+            key_bytes = bytes.fromhex(key_hex)
+            pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+            h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).digest()
+            
+            if h == TARGET_HASH:
+                result_queue.put(('found', key_hex))
+                return
                 
-                while self.current < Config.END and not self.should_stop:
-                    chunk_end = min(self.current + Config.CHUNK_SIZE, Config.END)
-                    futures.append(executor.submit(worker, self.current, chunk_end))
-                    self.current = chunk_end
-                    
-                    # Обработка завершенных задач
-                    for future in as_completed(futures):
-                        result = future.result()
-                        
-                        self.stats['total'] += result['processed']
-                        self.stats['valid'] += result['valid']
-                        self.stats['last_key'] = max(self.stats['last_key'], result['last_checked'])
-                        
-                        if result['found']:
-                            self.key_found(result['found'])
-                            return
-                            
-                        futures.remove(future)
-                        self.print_progress()
-                        break
+            # Отправляем прогресс каждые 1000 ключей
+            if key_int % 1000 == 0:
+                result_queue.put(('progress', key_int))
                 
-                # Завершение оставшихся задач
-                for future in as_completed(futures):
-                    if self.should_stop:
-                        break
-                        
-                    result = future.result()
-                    self.stats['total'] += result['processed']
-                    self.stats['valid'] += result['valid']
-                    self.stats['last_key'] = max(self.stats['last_key'], result['last_checked'])
-                    
-                    if result['found']:
-                        self.key_found(result['found'])
-                        return
-                        
-                    self.print_progress()
-                    
-        except Exception as e:
-            error_msg = f"Ошибка: {str(e)}"
-            print(error_msg)
-            self.log(error_msg)
-        
-        print("\nЗавершено" + (" (прервано)" if self.should_stop else " - ключ не найден"))
-        self.log(f"Всего проверено: {self.stats['total']:,} ключей")
-        self.log(f"Действительных ключей: {self.stats['valid']:,}")
+        except Exception:
+            continue
+    result_queue.put(('done', end))
 
-    def key_found(self, key):
-        print(f"\n\n!!! НАЙДЕН КЛЮЧ !!!")
-        print(f"Приватный ключ: {key}")
-        print(f"Хеш: {Config.TARGET_HASH.hex()}")
+def format_key(key_int):
+    """Форматирование ключа для вывода"""
+    return f"{key_int:064x}"
+
+def find_key_parallel():
+    """Параллельный поиск с обновляемым прогрессом"""
+    print(f"\n⚡ Запуск поиска с {THREADS} ядрами")
+    print(f"🔍 Диапазон: {hex(START_KEY)}-{hex(END_KEY)}")
+    print(f"🎯 Целевой хеш: {TARGET_HASH.hex()}")
+    total_keys = END_KEY - START_KEY + 1
+    print(f"Всего ключей: {total_keys:,}\n")
+
+    manager = multiprocessing.Manager()
+    result_queue = manager.Queue()
+    start_time = time.time()
+    last_report_key = START_KEY
+    found_key = None
+    last_progress_time = start_time
+    last_progress_count = 0
+
+    # Создаем и запускаем процессы
+    with ProcessPoolExecutor(max_workers=THREADS) as executor:
+        chunks = [(s, min(s + CHUNK_SIZE - 1, END_KEY)) 
+                 for s in range(START_KEY, END_KEY + 1, CHUNK_SIZE)]
+        futures = [executor.submit(process_chunk, start, end, result_queue) 
+                  for start, end in chunks]
+
+        # Настраиваем прогресс-бар
+        progress_bar = tqdm(total=total_keys, desc="Прогресс", unit="key", 
+                          bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
         
-        with open(Config.FOUND_FILE, 'a') as f:
-            f.write(f"{time.ctime()}\n{key}\n")
-        self.log(f"Найден ключ: {key}")
+        while not found_key and any(not f.done() for f in futures):
+            while not result_queue.empty():
+                msg_type, data = result_queue.get()
+                
+                if msg_type == 'progress':
+                    # Обновляем прогресс-бар
+                    progress_bar.update(data - progress_bar.n)
+                    
+                    # Рассчитываем текущую скорость
+                    current_time = time.time()
+                    time_diff = current_time - last_progress_time
+                    keys_diff = data - last_progress_count
+                    if time_diff > 0:
+                        current_speed = keys_diff / time_diff
+                    else:
+                        current_speed = 0
+                    
+                    # Обновляем строку с последним ключом
+                    if data - last_report_key >= REPORT_INTERVAL:
+                        sys.stdout.write('\r' + ' ' * 100 + '\r')  # Очищаем строку
+                        sys.stdout.write(f"Последний ключ: {format_key(data)} | Скорость: {current_speed:,.0f} keys/s")
+                        sys.stdout.flush()
+                        last_report_key = data
+                        last_progress_time = current_time
+                        last_progress_count = data
+                        
+                elif msg_type == 'found':
+                    found_key = data
+                    for f in futures:
+                        f.cancel()
+                    break
+
+    # Очищаем строку с последним ключом
+    sys.stdout.write('\r' + ' ' * 100 + '\r\n')
+    progress_bar.close()
+
+    # Вывод результатов
+    elapsed = time.time() - start_time
+    print(f"\n{'='*50}")
+    print(f"Всего времени: {elapsed:.2f} сек")
+    print(f"Средняя скорость: {total_keys/max(1, elapsed):,.0f} keys/sec")
+    
+    if found_key:
+        print(f"\n🎉 КЛЮЧ НАЙДЕН!")
+        print(f"🔑 Приватный ключ: {found_key}")
+    else:
+        print(f"\n🔍 Ключ не найден в указанном диапазоне")
 
 if __name__ == "__main__":
-    if os.name == 'posix':
-        multiprocessing.set_start_method('fork')
+    # Проверка корректности преобразований
+    TEST_KEY = 0x349b84b6431a6c4ef1
+    test_hex = f"{TEST_KEY:064x}"
+    test_bytes = bytes.fromhex(test_hex)
+    pub_key = coincurve.PublicKey.from_secret(test_bytes).format(compressed=True)
+    sha256_hash = hashlib.sha256(pub_key).digest()
+    ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+    test_hash = ripemd160_hash.hex()
     
-    solver = KeySolver()
-    solver.run()
+    print("🔧 Тест преобразования ключа:")
+    print(f"Тестовый ключ: {test_hex}")
+    print(f"Полученный хеш: {test_hash}")
+    print(f"Ожидаемый хеш: {TARGET_HASH.hex()}")
+    print(f"Совпадение: {test_hash == TARGET_HASH.hex()}\n")
+
+    # Запуск параллельного поиска
+    find_key_parallel()
