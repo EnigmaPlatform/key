@@ -22,9 +22,9 @@ def is_trivial(key_hex: str) -> bool:
     if len(set(part)) < 4:
         return True
     for i in range(len(part)-3):
-        if (ord(part[i+1]) - ord(part[i])) == 1 and \
+        if (ord(part[i+1]) - ord(part[i]) == 1 and \
            ord(part[i+2]) - ord(part[i+1]) == 1 and \
-           ord(part[i+3]) - ord(part[i+2]) == 1:
+           ord(part[i+3]) - ord(part[i+2])) == 1:
             return True
     return False
 
