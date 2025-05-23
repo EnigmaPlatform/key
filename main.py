@@ -13,9 +13,9 @@ import coincurve
 class Config:
     FOUND_FILE = "found.txt"
     LOG_FILE = "scan.log"
-    TARGET_HASH = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-    START = 0x349b84b6431a5c4ef1
-    END = 0x349b84b6431a6c4ef1 + 1  # Добавляем +1 чтобы включить последний ключ
+    TARGET_HASH = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")
+    START = 0x60102a304e0c796a80
+    END = 0x800000000000000000 + 1  # Добавляем +1 чтобы включить последний ключ
     CHUNK_SIZE = 50000
     THREADS = multiprocessing.cpu_count()
 
