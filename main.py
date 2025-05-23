@@ -13,7 +13,7 @@ class Config:
     START = 0x349b84b643113c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
-    STATS_INTERVAL = 1_000_000
+    STATS_INTERVAL = 1_000
     PROGRESS_INTERVAL = 10
 
 def address_to_hash(address: str) -> bytes:
