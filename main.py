@@ -9,10 +9,11 @@ from functools import lru_cache
 class Config:
     FOUND_FILE = "found.txt"
     TARGET = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-    START = 0x349b84b643113c4ef1
+    START = 0x349b84b6431a3c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
-    STATS_INTERVAL = 10_000 # Обновление статистики каждые 10 млн ключей
+    STATS_INTERVAL = 1_000_000  # Выводить статистику каждые 1 млн ключей
+    PROGRESS_INTERVAL = 10_000   # Минимальный интервал между выводами прогресса (10 сек)
 
 @lru_cache(maxsize=1<<20)
 def is_trivial(key_hex: str) -> bool:
@@ -30,7 +31,7 @@ def key_to_hash(key_hex: str) -> bytes:
     try:
         priv = bytes.fromhex(key_hex)
         pub = coincurve.PublicKey.from_secret(priv).format(compressed=True)
-        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()).digest()
+        return hashlib.new('ripemd160', hashlib.sha256(pub).digest()
     except:
         return b''
 
@@ -52,11 +53,16 @@ def worker(args):
 class Solver:
     def __init__(self):
         self.current = Config.START
-        self.stats = {'checked': 0, 'speed': 0, 'total_checked': 0}
+        self.stats = {
+            'checked': 0,
+            'total_checked': 0,
+            'speed': 0,
+            'last_speed_time': time.time(),
+            'last_speed_count': 0
+        }
         self.start_time = time.time()
         self.last_checked = Config.START
-        self.last_stats_time = time.time()
-        self.last_stats_count = 0
+        self.last_print_time = time.time()
         signal.signal(signal.SIGINT, self.stop)
         self.should_stop = False
 
@@ -64,27 +70,35 @@ class Solver:
         print("\nStopping...")
         self.should_stop = True
 
-    def status(self):
-        elapsed = time.time() - self.start_time
-        recent_elapsed = time.time() - self.last_stats_time
-        recent_checked = self.stats['total_checked'] - self.last_stats_count
+    def print_progress(self, force_print=False):
+        now = time.time()
+        elapsed = now - self.start_time
+        time_since_last_print = now - self.last_print_time
         
-        if recent_elapsed > 0:
-            self.stats['speed'] = recent_checked / recent_elapsed
+        # Обновляем скорость каждые 5 секунд
+        if now - self.stats['last_speed_time'] >= 5:
+            self.stats['speed'] = (self.stats['total_checked'] - self.stats['last_speed_count']) / \
+                                 (now - self.stats['last_speed_time'])
+            self.stats['last_speed_time'] = now
+            self.stats['last_speed_count'] = self.stats['total_checked']
         
-        remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1))
-        
-        print(f"\n=== Статистика ===")
-        print(f"Всего проверено: {self.stats['total_checked']:,}")
-        print(f"Скорость: {self.stats['speed']/1e6:.2f} млн/сек")
-        print(f"Прогресс: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}%")
-        print(f"Последний ключ: {hex(self.last_checked)}")
-        print(f"Завершение через: {remaining/3600:.1f} часов")
-        print(f"==================")
-        
-        # Обновляем время последней статистики
-        self.last_stats_time = time.time()
-        self.last_stats_count = self.stats['total_checked']
+        # Печатаем прогресс если:
+        # 1) Прошло больше Config.PROGRESS_INTERVAL секунд
+        # 2) Проверено больше Config.STATS_INTERVAL ключей
+        # 3) Принудительный вывод (force_print)
+        if force_print or time_since_last_print >= Config.PROGRESS_INTERVAL or \
+           self.stats['total_checked'] // Config.STATS_INTERVAL != \
+           (self.stats['total_checked'] - self.stats['checked']) // Config.STATS_INTERVAL:
+            
+            remaining = max(0, (Config.END - self.current) / max(self.stats['speed'], 1e-9)
+            
+            print(f"\n[Прогресс] Проверено: {self.stats['total_checked']:,} | "
+                  f"Скорость: {self.stats['speed']/1e6:.2f} млн/сек | "
+                  f"Прогресс: {(self.current-Config.START)/(Config.END-Config.START)*100:.2f}% | "
+                  f"Последний ключ: {hex(self.last_checked)} | "
+                  f"Осталось: {remaining/3600:.1f} ч")
+            
+            self.last_print_time = now
 
     def run(self):
         print(f"Начало сканирования от {hex(Config.START)} до {hex(Config.END)}")
@@ -110,16 +124,13 @@ class Solver:
                         self.found(result['found'])
                         return
                     self.last_checked = max(self.last_checked, result['last'])
-                    self.stats['checked'] += result['processed']
+                    self.stats['checked'] = result['processed']
                     self.stats['total_checked'] += result['processed']
                 
                 self.current = batch_end + 1
-                
-                # Вывод статистики каждые 10 млн ключей
-                if self.stats['total_checked'] - self.last_stats_count >= Config.STATS_INTERVAL:
-                    self.status()
+                self.print_progress()
         
-        self.status()
+        self.print_progress(force_print=True)
         print("\nСканирование завершено - ключ не найден")
 
     def found(self, key):
