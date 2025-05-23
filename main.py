@@ -10,7 +10,7 @@ from functools import lru_cache
 class Config:
     FOUND_FILE = "found.txt"
     TARGET = None  # Will be set in __init__
-    START = 0x349b84b6431a3c4ef1
+    START = 0x349b84b643113c4ef1
     END = 0x349b84b6431a6c4ef1
     BATCH = 50_000
     STATS_INTERVAL = 1_000_000
