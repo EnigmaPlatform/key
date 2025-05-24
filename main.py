@@ -14,10 +14,10 @@ from datetime import datetime
 TARGET_HASH = "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"
 TEST_KEY = "0000000000000000000000000000000000000000000000000000000000000001"
 TEST_HASH = "751e76e8199196d454941c45d1b3a323f1433bd6"
-PROGRESS_STEP = 10000  # Шаг обновления прогресса
+PROGRESS_STEP = 1000000  # Шаг обновления прогресса
 SKIP_UPDATE_INTERVAL = 500000  # Интервал обновления статистики пропусков
 MIN_UPDATE_INTERVAL = 0.1  # Минимальный интервал между обновлениями (сек)
-AUTOSAVE_INTERVAL = 100_000_000  # Автосохранение каждые 100M операций
+AUTOSAVE_INTERVAL = 100_000_000 # Автосохранение каждые 100M операций
 MIN_SAVE_INTERVAL = 600  # Минимальный интервал между сохранениями (сек)
 
 # Фиксированные диапазоны для потоков
@@ -149,7 +149,7 @@ class ProgressDisplay:
         self.last_update = now
 
 def save_state(filename='progress.pkl'):
-    """Улучшенное сохранение состояния с защитой и бэкапами"""
+    """Улучшенное сохранение состояния с удалением старого файла"""
     # Защита от частого сохранения
     now = time.time()
     if hasattr(save_state, '_last_call') and now - save_state._last_call < MIN_SAVE_INTERVAL:
@@ -157,22 +157,17 @@ def save_state(filename='progress.pkl'):
     save_state._last_call = now
     
     try:
-        # Создаем резервную копию
-        if os.path.exists(filename):
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_name = f"progress_{timestamp}.pkl"
-            shutil.copyfile(filename, backup_name)
-        
         # Атомарное сохранение через временный файл
         tempname = filename + '.tmp'
         with open(tempname, 'wb') as f:
             pickle.dump(THREAD_CONFIG, f)
         
-        # Заменяем старый файл новым
+        # Удаляем старый файл, если он существует
         if os.path.exists(filename):
-            os.replace(tempname, filename)
-        else:
-            os.rename(tempname, filename)
+            os.remove(filename)
+        
+        # Переименовываем временный файл
+        os.rename(tempname, filename)
         
         # Статистика сохранения
         total_ops = sum(t['processed'] + t['skipped'] for t in THREAD_CONFIG.values())
