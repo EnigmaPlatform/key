@@ -22,14 +22,14 @@ MIN_SAVE_INTERVAL = 600  # Минимальный интервал между с
 
 # Фиксированные диапазоны для потоков
 THREAD_CONFIG = {
-    0: {'start': 0x400000000000000000, 'end': 0x480000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    1: {'start': 0x480000000000000000, 'end': 0x500000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    2: {'start': 0x500000000000000000, 'end': 0x580000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    3: {'start': 0x580000000000000000, 'end': 0x600000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    4: {'start': 0x600000000000000000, 'end': 0x680000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    5: {'start': 0x680000000000000000, 'end': 0x700000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    6: {'start': 0x700000000000000000, 'end': 0x780000000000000000, 'current': None, 'processed': 0, 'skipped': 0},
-    7: {'start': 0x780000000000000000, 'end': 0x800000000000000000, 'current': None, 'processed': 0, 'skipped': 0}
+    0: {'start': 0x40102a304dad1b5a80, 'end': 0x480102a304dad1b5a8, 'current': None, 'processed': 0, 'skipped': 0},
+    1: {'start': 0x480102a304dad1b5a8, 'end': 0x50102a304dad1b5a80, 'current': None, 'processed': 0, 'skipped': 0},
+    2: {'start': 0x50102a304dad1b5a80, 'end': 0x580102a304dad1b5a8, 'current': None, 'processed': 0, 'skipped': 0},
+    3: {'start': 0x580102a304dad1b5a8, 'end': 0x60102a304dad1b5a80, 'current': None, 'processed': 0, 'skipped': 0},
+    4: {'start': 0x60102a304dad1b5a80, 'end': 0x680102a304dad1b5a8, 'current': None, 'processed': 0, 'skipped': 0},
+    5: {'start': 0x680102a304dad1b5a8, 'end': 0x70102a304dad1b5a80, 'current': None, 'processed': 0, 'skipped': 0},
+    6: {'start': 0x70102a304dad1b5a80, 'end': 0x780102a304dad1b5a8, 'current': None, 'processed': 0, 'skipped': 0},
+    7: {'start': 0x780102a304dad1b5a8, 'end': 0x80102a304dad1b5a80, 'current': None, 'processed': 0, 'skipped': 0}
 }
 
 # ANSI escape codes
