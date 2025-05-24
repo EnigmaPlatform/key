@@ -8,9 +8,9 @@ import time
 import sys
 
 # Конфигурация
-TARGET_HASH = bytes.fromhex("5db8cda53a6a002db10365967d7f85d19e171b10")
-START_KEY = 0x349b84b643106c4ef1
-END_KEY = 0x349b84b6431a6c4ef1
+TARGET_HASH = bytes.fromhex("f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8")
+START_KEY = 0x400000000000000000
+END_KEY = 0x800000000000000000
 CHUNK_SIZE = 1000000
 THREADS = multiprocessing.cpu_count()
 REPORT_INTERVAL = 1_000_000  # Отчет каждые 10 млн ключей
