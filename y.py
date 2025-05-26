@@ -18,7 +18,7 @@ START_RANGE = 0x349b84b643196c4ef1
 END_RANGE = 0x349b84b6431a6c4ef1
 NUM_THREADS = 12
 AUTOSAVE_INTERVAL = 300
-PROGRESS_UPDATE_INTERVAL = 1000  # Обновлять прогресс каждые 1000 ключей
+PROGRESS_UPDATE_INTERVAL = 1000
 
 # Настройки фильтрации ключей
 FILTER_CONFIG = {
@@ -69,7 +69,7 @@ class AnalyticsDisplay:
         
     def init_display(self):
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[H")  # Курсор в начало
+        print("\033[H")
         
         # Шапка
         self._print_section('header', 
@@ -130,13 +130,11 @@ class AnalyticsDisplay:
         )
 
     def _print_section(self, name, *lines):
-        """Выводит секцию с заголовком"""
         pos = self.sections[name]
         for i, line in enumerate(lines):
             print(f"\033[{pos+i};0H\033[K{line}", end="")
 
     def update_progress(self, progress, speed):
-        """Обновляет прогресс-бар"""
         filled = min(int(progress * 20), 20)
         bar = f"[{'#' * filled}{' ' * (20 - filled)}]"
         percent = min(progress * 100, 100)
@@ -146,7 +144,6 @@ class AnalyticsDisplay:
         )
 
     def update_thread(self, thread_id, key_hex, current_hash, processed, speed):
-        """Обновляет информацию о потоке"""
         line = self.thread_lines[thread_id]
         short_key = key_hex[-16:] if len(key_hex) > 16 else key_hex
         short_hash = f"{current_hash[:8]}..{current_hash[-6:]}" if current_hash else '...вычисляется...'
@@ -155,7 +152,6 @@ class AnalyticsDisplay:
               f"{processed:>12,}{speed:>12.1f}", end="")
 
     def update_stats(self, total, interesting, skipped, speed):
-        """Обновляет статистику"""
         self._print_section('stats',
             f"{COLOR['bold']}▌ СТАТИСТИКА:{COLOR['reset']}",
             f"Всего обработано: {total:>15,}",
@@ -165,7 +161,6 @@ class AnalyticsDisplay:
         )
 
     def update_reasons(self, reasons):
-        """Обновляет причины пропуска"""
         self._print_section('reasons',
             f"{COLOR['bold']}▌ ПРИЧИНЫ ПРОПУСКА:{COLOR['reset']}",
             f"Повторы символов: {reasons.get('repeating_chars',0):>14,}",
@@ -175,7 +170,6 @@ class AnalyticsDisplay:
         )
 
     def show_found(self, key_hex, found_hash):
-        """Отображает найденный ключ в отдельном блоке"""
         self._print_section('details',
             f"{COLOR['green']}▌{' КЛЮЧ НАЙДЕН! ':=^78}▌{COLOR['reset']}",
             f"▌ Приватный ключ: {COLOR['green']}0x{key_hex}{COLOR['reset']}",
@@ -243,6 +237,21 @@ def get_skip_reason(key_hex):
         return 'symmetric'
     return 'other'
 
+def run_hash_test():
+    try:
+        key_bytes = bytes.fromhex(TEST_KEY)
+        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+        sha256_hash = hashlib.sha256(pub_key).digest()
+        ripemd160 = hashlib.new('ripemd160', sha256_hash).hexdigest()
+        return ripemd160 == TEST_HASH
+    except Exception as e:
+        print(f"{COLOR['red']}Ошибка в тесте: {str(e)}{COLOR['reset']}")
+        return False
+
+def calculate_speed(start_time, processed):
+    elapsed = max(time.time() - start_time, 0.001)
+    return processed / elapsed
+
 def worker(thread_id, start, end, initial_state=None):
     state = {
         'processed': 0,
@@ -265,7 +274,6 @@ def worker(thread_id, start, end, initial_state=None):
     
     if initial_state:
         state.update(initial_state)
-        # Корректируем начальное значение для правильного отображения
         state['current'] = max(state['current'], start)
     
     current = state['current']
@@ -294,4 +302,192 @@ def worker(thread_id, start, end, initial_state=None):
             continue
             
         try:
-            key_bytes = bytes.fromhex(key
+            key_bytes = bytes.fromhex(key_hex)
+            pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+            h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
+            
+            if h == TARGET_HASH:
+                if current > block_start:
+                    state['blocks'].append({
+                        'start': block_start,
+                        'end': current-1,
+                        'valid': True,
+                        'size': current - block_start
+                    })
+                
+                return {
+                    'status': 'found',
+                    'key': key_hex,
+                    'hash': h,
+                    'thread_id': thread_id,
+                    'stats': state
+                }
+            
+            state['processed'] += 1
+            state['interesting_keys'] += 1
+            
+            if (state['processed'] % PROGRESS_UPDATE_INTERVAL == 0 or 
+                time.time() - state['last_progress_update'] > 1):
+                state['last_progress_update'] = time.time()
+                return {
+                    'status': 'progress',
+                    'thread_id': thread_id,
+                    'key': key_hex,
+                    'hash': h,
+                    'stats': state
+                }
+            
+            if time.time() - state['last_save'] > AUTOSAVE_INTERVAL:
+                state['current'] = current + 1
+                with open(f'progress_thread_{thread_id}.pkl', 'wb') as f:
+                    pickle.dump(state, f)
+                state['last_save'] = time.time()
+                
+        except Exception as e:
+            print(f"{COLOR['red']}Ошибка в потоке {thread_id}: {str(e)}{COLOR['reset']}")
+            current += 1
+            continue
+        
+        current += 1
+    
+    if current > block_start:
+        state['blocks'].append({
+            'start': block_start,
+            'end': current-1,
+            'valid': True,
+            'size': current - block_start
+        })
+    
+    return {
+        'status': 'completed',
+        'thread_id': thread_id,
+        'stats': state
+    }
+
+def main():
+    display = AnalyticsDisplay(NUM_THREADS)
+    display.init_display()
+    
+    # Проверяем и загружаем сохраненные состояния
+    initial_states = []
+    for i in range(NUM_THREADS):
+        try:
+            with open(f'progress_thread_{i}.pkl', 'rb') as f:
+                initial_states.append(pickle.load(f))
+                os.remove(f'progress_thread_{i}.pkl')
+        except:
+            initial_states.append(None)
+    
+    # Распределяем диапазоны
+    chunk_size = (END_RANGE - START_RANGE) // NUM_THREADS
+    ranges = []
+    for i in range(NUM_THREADS):
+        start = START_RANGE + i * chunk_size
+        end = start + chunk_size - 1 if i < NUM_THREADS - 1 else END_RANGE
+        ranges.append((i, start, end, initial_states[i] if initial_states[i] else None))
+    
+    start_time = time.time()
+    found_key = None
+    
+    with ProcessPoolExecutor(max_workers=NUM_THREADS) as executor:
+        futures = [executor.submit(worker, *args) for args in ranges]
+        
+        try:
+            while True:
+                time.sleep(0.2)
+                
+                total_stats = {
+                    'processed': 0,
+                    'interesting': 0,
+                    'skipped': 0,
+                    'reasons': Counter(),
+                    'speed': 0
+                }
+                all_done = True
+                
+                for i, future in enumerate(futures):
+                    if not future.done():
+                        all_done = False
+                        continue
+                        
+                    try:
+                        result = future.result()
+                        if result.get('status') == 'found':
+                            found_key = result['key']
+                            found_hash = result['hash']
+                            display.show_found(found_key, found_hash)
+                            break
+                            
+                        stats = result['stats']
+                        total_stats['processed'] += stats['processed']
+                        total_stats['interesting'] += stats['interesting_keys']
+                        total_stats['skipped'] += stats['total_skipped_keys']
+                        total_stats['reasons'] += Counter(stats['reasons'])
+                        total_stats['speed'] += calculate_speed(stats['start_time'], stats['processed'])
+                        
+                        if result.get('status') == 'progress':
+                            display.update_thread(
+                                result['thread_id'],
+                                result['key'],
+                                result['hash'],
+                                stats['processed'],
+                                calculate_speed(stats['start_time'], stats['processed'])
+                            )
+                            
+                    except Exception as e:
+                        print(f"{COLOR['red']}Ошибка обработки потока {i}: {str(e)}{COLOR['reset']}")
+                
+                if found_key:
+                    break
+                    
+                if all_done:
+                    break
+                
+                processed_total = sum(
+                    f.result()['stats']['processed'] 
+                    for f in futures if f.done()
+                )
+                range_total = END_RANGE - START_RANGE
+                progress = min(processed_total / range_total, 1.0) if range_total > 0 else 0
+                
+                display.update_progress(progress, total_stats['speed'])
+                display.update_stats(
+                    total_stats['processed'],
+                    total_stats['interesting'],
+                    total_stats['skipped'],
+                    total_stats['speed']
+                )
+                display.update_reasons(total_stats['reasons'])
+                
+        except KeyboardInterrupt:
+            display._print_section('details',
+                f"{COLOR['yellow']}▌ Поиск остановлен пользователем{COLOR['reset']}",
+                "▌ Сохранение состояния потоков..."
+            )
+            
+            for i, future in enumerate(futures):
+                if not future.done():
+                    continue
+                try:
+                    result = future.result()
+                    if 'stats' in result:
+                        with open(f'progress_thread_{i}.pkl', 'wb') as f:
+                            pickle.dump(result['stats'], f)
+                except:
+                    pass
+    
+    if not found_key:
+        display._print_section('details',
+            f"{COLOR['yellow']}▌ Поиск завершен. Ключ не найден.{COLOR['reset']}",
+            f"▌ Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}",
+            f"▌ Всего обработано: {total_stats['processed']:,} ключей"
+        )
+
+    print(f"\033[{display.sections['details'] + 10};0H")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"{COLOR['red']}Критическая ошибка: {str(e)}{COLOR['reset']}")
+        sys.exit(1)
