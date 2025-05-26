@@ -18,7 +18,7 @@ START_RANGE = 0x349b84b643196c4ef1
 END_RANGE = 0x349b84b6431a6c4ef1
 NUM_THREADS = 12
 AUTOSAVE_INTERVAL = 300
-BACKUP_COUNT = 3
+PROGRESS_UPDATE_INTERVAL = 1000  # Обновлять прогресс каждые 1000 ключей
 
 # Настройки фильтрации ключей
 FILTER_CONFIG = {
@@ -49,150 +49,140 @@ COLOR = {
     'bold': "\033[1m"
 }
 
-class ConsoleDisplay:
+class AnalyticsDisplay:
     def __init__(self, num_threads):
         self.num_threads = num_threads
-        self.line_map = {
+        self.sections = {
             'header': 0,
             'test': 4,
-            'config': 8,
-            'threads_header': 12,
-            'threads_start': 13,
-            'stats_start': 13 + num_threads + 1,
-            'reasons_start': 13 + num_threads + 6,
-            'progress_start': 13 + num_threads + 12
+            'progress': 7,
+            'threads': 9,
+            'stats': 9 + num_threads + 3,
+            'reasons': 9 + num_threads + 8,
+            'details': 9 + num_threads + 15
         }
-        self.last_update = 0
-        self.update_interval = 0.2
+        self.thread_lines = list(range(
+            self.sections['threads'] + 2,
+            self.sections['threads'] + 2 + num_threads
+        ))
+        self.last_update = time.time()
         
     def init_display(self):
         os.system('cls' if os.name == 'nt' else 'clear')
-        print("\033[H")  # Move cursor to home position
+        print("\033[H")  # Курсор в начало
         
-        # Header
-        self.print_at('header', f"{COLOR['blue']}{COLOR['bold']}{'='*60}")
-        self.print_at('header+1', f"{'ПОИСК КРИПТОГРАФИЧЕСКИХ КЛЮЧЕЙ':^60}")
-        self.print_at('header+2', f"{'='*60}{COLOR['reset']}")
+        # Шапка
+        self._print_section('header', 
+            f"{COLOR['blue']}▄{'▄'*78}▄{COLOR['reset']}\n"
+            f"{COLOR['blue']}█{'ПОИСК КРИПТОГРАФИЧЕСКИХ КЛЮЧЕЙ'.center(78)}█{COLOR['reset']}\n"
+            f"{COLOR['blue']}▀{'▀'*78}▀{COLOR['reset']}"
+        )
         
-        # Test info
-        self.print_at('test', f"{COLOR['bold']}Тест хеширования:{COLOR['reset']}")
+        # Тест хеширования
+        test_passed = run_hash_test()
+        status = f"{COLOR['green']}ПРОЙДЕН" if test_passed else f"{COLOR['red']}НЕ ПРОЙДЕН"
+        self._print_section('test',
+            f"{COLOR['bold']}▌ ТЕСТ ХЕШИРОВАНИЯ: {status}{COLOR['reset']}",
+            f"▌ Тестовый ключ: {TEST_KEY}",
+            f"▌ Ожидаемый хеш: {TEST_HASH}"
+        )
         
-        # Config
-        self.print_at('config', f"{COLOR['bold']}Настройки поиска:{COLOR['reset']}")
+        if not test_passed:
+            sys.exit(1)
         
-        # Threads table header
-        self.print_at('threads_header', f"{'Поток':<8}{'Статус':<15}{'Обработано':<12}{'Интересных':<12}{'Пропущено':<12}{'Блоков':<12}")
+        # Прогресс
+        self._print_section('progress', 
+            f"{COLOR['bold']}▌ ПРОГРЕСС:{COLOR['reset']}",
+            f"[{' ' * 20}] 0.00% | 0.0 keys/s"
+        )
         
-        # Initialize empty thread lines
-        for i in range(self.num_threads):
-            self.print_at(f'threads_start+{i}', "")
+        # Потоки
+        self._print_section('threads',
+            f"{COLOR['bold']}▌ АКТИВНЫЕ ПОТОКИ:{COLOR['reset']}",
+            f"{'ID':<4}{'Текущий ключ':<20}{'Хеш':<22}{'Обработано':>12}{'Скорость':>12}",
+            f"{'-'*4:<4}{'-'*20:<20}{'-'*22:<22}{'(ключей)':>12}{'(keys/s)':>12}"
+        )
         
-        # Stats
-        self.print_at('stats_start', f"{COLOR['bold']}Общая статистика:{COLOR['reset']}")
+        # Статистика
+        self._print_section('stats',
+            f"{COLOR['bold']}▌ СТАТИСТИКА:{COLOR['reset']}",
+            f"Всего обработано: {0:>15}",
+            f"Интересных ключей: {0:>13}",
+            f"Пропущено ключей: {0:>14}",
+            f"Общая скорость: {0:>17} keys/s"
+        )
         
-        # Skip reasons
-        self.print_at('reasons_start', f"{COLOR['bold']}Причины пропуска ключей:{COLOR['reset']}")
+        # Причины пропуска
+        self._print_section('reasons',
+            f"{COLOR['bold']}▌ ПРИЧИНЫ ПРОПУСКА:{COLOR['reset']}",
+            f"Повторы символов: {0:>14}",
+            f"Последовательности: {0:>11}",
+            f"Симметричные комбинации: {0:>6}",
+            f"Мало уникальных символов: {0:>8}"
+        )
         
-        # Progress bar
-        self.print_at('progress_start', f"{COLOR['bold']}Прогресс:{COLOR['reset']}")
-        
-    def print_at(self, position, text):
-        if '+' in position:
-            base, offset = position.split('+')
-            line = self.line_map[base] + int(offset)
-        else:
-            line = self.line_map[position]
-        print(f"\033[{line};0H\033[K{text}", end="")
-        
-    def update_test_info(self, passed):
-        status = f"{COLOR['green']}✅ ПРОЙДЕН" if passed else f"{COLOR['red']}❌ НЕ ПРОЙДЕН"
-        self.print_at('test', f"{COLOR['bold']}Тест хеширования:{COLOR['reset']} {status}")
-        self.print_at('test+1', f"Тестовый ключ: {TEST_KEY}")
-        self.print_at('test+2', f"Ожидаемый хеш: {TEST_HASH}")
-        
-    def update_config(self):
-        self.print_at('config', f"{COLOR['bold']}Настройки поиска:{COLOR['reset']}")
-        self.print_at('config+1', f"Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}")
-        self.print_at('config+2', f"Потоков: {NUM_THREADS}")
-        
-    def update_thread(self, thread_id, key_hex, current_hash, processed, interesting):
-        if time.time() - self.last_update < self.update_interval:
-            return
-            
-        last_18 = key_hex[-18:] if len(key_hex) >= 18 else key_hex
-        key_display = f"0x{last_18}"
-        hash_display = f"{current_hash[:8]}...{current_hash[-8:]}"
-        
-        self.print_at(f'threads_start+{thread_id}', 
-            f"{thread_id:<8}{COLOR['cyan']}работает{COLOR['reset']:<15}"
-            f"{processed:<12}{interesting:<12}"
-            f"{'-':<12}{'-':<12}"
-            f"Ключ: {key_display} Хеш: {hash_display}")
-        
-        self.last_update = time.time()
-        
-    def update_stats(self, futures, start_time):
-        completed = 0
-        found = False
-        total_stats = {
-            'processed': 0,
-            'skipped_blocks': 0,
-            'total_skipped_keys': 0,
-            'interesting_keys': 0,
-            'reasons': {
-                'repeating_chars': 0,
-                'sequential': 0,
-                'symmetric': 0,
-                'unique_chars': 0
-            }
-        }
-        
-        for future in futures:
-            if future.done():
-                result = future.result()
-                if result.get('status') == 'found':  # Исправлено: добавлена проверка .get()
-                    found = True
-                completed += 1
-                
-                for stat in ['processed', 'skipped_blocks', 'total_skipped_keys', 'interesting_keys']:
-                    total_stats[stat] += result['stats'][stat]
-                
-                for reason in total_stats['reasons']:
-                    total_stats['reasons'][reason] += result['stats']['reasons'].get(reason, 0)
-        
-        # Update thread statuses
-        for i, future in enumerate(futures):
-            if future.done():
-                result = future.result()
-                status = f"{COLOR['green']}завершен{COLOR['reset']}"
-                blocks = f"{len(result['stats']['blocks'])} ({result['stats']['skipped_blocks']})"
-                
-                self.print_at(f'threads_start+{i}',
-                    f"{i:<8}{status:<15}"
-                    f"{result['stats']['processed']:<12}"
-                    f"{result['stats']['interesting_keys']:<12}"
-                    f"{result['stats']['total_skipped_keys']:<12}"
-                    f"{blocks:<12}")
-        
-        # Update stats
-        self.print_at('stats_start+1', f"Обработано ключей: {total_stats['processed']}")
-        self.print_at('stats_start+2', f"Потенциально интересных ключей: {total_stats['interesting_keys']}")
-        self.print_at('stats_start+3', f"Пропущено ключей: {total_stats['total_skipped_keys']}")
-        self.print_at('stats_start+4', f"Всего блоков: {sum(len(f.result()['stats']['blocks']) for f in futures if f.done())} (пропущено: {total_stats['skipped_blocks']})")
-        
-        # Update skip reasons
-        for i, (reason, count) in enumerate(total_stats['reasons'].items()):
-            self.print_at(f'reasons_start+{i+1}', f"- {reason}: {count}")
-        
-        # Update progress
-        if not found:
-            progress = sum(f.result()['stats']['current']-START_RANGE for f in futures if f.done()) / (END_RANGE - START_RANGE)
-            bar_length = 50
-            filled = int(bar_length * progress)
-            bar = f"{COLOR['green']}{'#'*filled}{COLOR['reset']}{'-'*(bar_length-filled)}"
-            self.print_at('progress_start+1', f"[{bar}] {progress*100:.21f}%")
-        
-        return found
+        # Детали
+        self._print_section('details',
+            f"{COLOR['bold']}▌ ДЕТАЛИ ПОИСКА:{COLOR['reset']}",
+            f"▌ Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}",
+            f"▌ Потоков: {NUM_THREADS}",
+            f"▌ Фильтр: анализируются последние 17 символов"
+        )
+
+    def _print_section(self, name, *lines):
+        """Выводит секцию с заголовком"""
+        pos = self.sections[name]
+        for i, line in enumerate(lines):
+            print(f"\033[{pos+i};0H\033[K{line}", end="")
+
+    def update_progress(self, progress, speed):
+        """Обновляет прогресс-бар"""
+        filled = min(int(progress * 20), 20)
+        bar = f"[{'#' * filled}{' ' * (20 - filled)}]"
+        percent = min(progress * 100, 100)
+        self._print_section('progress',
+            f"{COLOR['bold']}▌ ПРОГРЕСС:{COLOR['reset']}",
+            f"{bar} {percent:.2f}% | {speed:.1f} keys/s"
+        )
+
+    def update_thread(self, thread_id, key_hex, current_hash, processed, speed):
+        """Обновляет информацию о потоке"""
+        line = self.thread_lines[thread_id]
+        short_key = key_hex[-16:] if len(key_hex) > 16 else key_hex
+        short_hash = f"{current_hash[:8]}..{current_hash[-6:]}" if current_hash else '...вычисляется...'
+        print(f"\033[{line};0H\033[K"
+              f"{thread_id:<4}0x{short_key:<18} {short_hash:<20} "
+              f"{processed:>12,}{speed:>12.1f}", end="")
+
+    def update_stats(self, total, interesting, skipped, speed):
+        """Обновляет статистику"""
+        self._print_section('stats',
+            f"{COLOR['bold']}▌ СТАТИСТИКА:{COLOR['reset']}",
+            f"Всего обработано: {total:>15,}",
+            f"Интересных ключей: {interesting:>13,}",
+            f"Пропущено ключей: {skipped:>14,}",
+            f"Общая скорость: {speed:>17,.1f} keys/s"
+        )
+
+    def update_reasons(self, reasons):
+        """Обновляет причины пропуска"""
+        self._print_section('reasons',
+            f"{COLOR['bold']}▌ ПРИЧИНЫ ПРОПУСКА:{COLOR['reset']}",
+            f"Повторы символов: {reasons.get('repeating_chars',0):>14,}",
+            f"Последовательности: {reasons.get('sequential',0):>11,}",
+            f"Симметричные комбинации: {reasons.get('symmetric',0):>6,}",
+            f"Мало уникальных символов: {reasons.get('unique_chars',0):>8,}"
+        )
+
+    def show_found(self, key_hex, found_hash):
+        """Отображает найденный ключ в отдельном блоке"""
+        self._print_section('details',
+            f"{COLOR['green']}▌{' КЛЮЧ НАЙДЕН! ':=^78}▌{COLOR['reset']}",
+            f"▌ Приватный ключ: {COLOR['green']}0x{key_hex}{COLOR['reset']}",
+            f"▌ Найденный хеш: {found_hash}",
+            f"▌ Ожидаемый хеш: {TARGET_HASH}",
+            f"{COLOR['green']}▌{'='*78}▌{COLOR['reset']}"
+        )
 
 def has_repeating_chars(s, max_repeat):
     return any(sum(1 for _ in group) > max_repeat for _, group in itertools.groupby(s))
@@ -211,7 +201,7 @@ def contains_pattern(s, patterns):
     return any(patt.lower() in s_lower for patt in patterns)
 
 def is_potentially_interesting(key_hex):
-    last_17 = key_hex[-17:]
+    last_17 = key_hex[-17:] if len(key_hex) >= 17 else key_hex
     
     if len(set(last_17)) < FILTER_CONFIG['min_unique_chars']:
         return False
@@ -240,6 +230,18 @@ def find_next_interesting(start):
         current += 1
     return END_RANGE + 1
 
+def get_skip_reason(key_hex):
+    last_17 = key_hex[-17:] if len(key_hex) >= 17 else key_hex
+    
+    if len(set(last_17)) < FILTER_CONFIG['min_unique_chars']:
+        return 'unique_chars'
+    if has_repeating_chars(last_17, FILTER_CONFIG['max_repeat_chars']):
+        return 'repeating_chars'
+    if FILTER_CONFIG['check_sequential'] and (is_sequential(last_17, 1) or is_sequential(last_17, -1)):
+        return 'sequential'
+    if FILTER_CONFIG['check_symmetric'] and is_symmetric(last_17):
+        return 'symmetric'
+    return 'other'
 
 def worker(thread_id, start, end, initial_state=None):
     state = {
@@ -250,6 +252,7 @@ def worker(thread_id, start, end, initial_state=None):
         'last_key': None,
         'start_time': time.time(),
         'last_save': time.time(),
+        'last_progress_update': time.time(),
         'blocks': [],
         'interesting_keys': 0,
         'reasons': {
@@ -262,6 +265,8 @@ def worker(thread_id, start, end, initial_state=None):
     
     if initial_state:
         state.update(initial_state)
+        # Корректируем начальное значение для правильного отображения
+        state['current'] = max(state['current'], start)
     
     current = state['current']
     block_start = current
@@ -289,170 +294,4 @@ def worker(thread_id, start, end, initial_state=None):
             continue
             
         try:
-            key_bytes = bytes.fromhex(key_hex)
-            pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
-            h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
-            
-            if h == TARGET_HASH:
-                if current > block_start:
-                    state['blocks'].append({
-                        'start': block_start,
-                        'end': current-1,
-                        'valid': True,
-                        'size': current - block_start
-                    })
-                
-                return {
-                    'status': 'found',
-                    'key': key_hex,
-                    'thread_id': thread_id,
-                    'stats': state
-                }
-                
-            state['processed'] += 1
-            state['interesting_keys'] += 1
-            
-            if time.time() - state['last_save'] > AUTOSAVE_INTERVAL:
-                state['current'] = current
-                with open(f'progress_thread_{thread_id}.pkl', 'wb') as f:
-                    pickle.dump(state, f)
-                state['last_save'] = time.time()
-                
-            return state  # Return partial results for display
-                
-        except Exception as e:
-            print(f"{COLOR['red']}Ошибка в потоке {thread_id}: {str(e)}{COLOR['reset']}")
-        
-        current += 1
-    
-    if current > block_start:
-        state['blocks'].append({
-            'start': block_start,
-            'end': current-1,
-            'valid': True,
-            'size': current - block_start
-        })
-    
-    return {
-        'status': 'completed',
-        'thread_id': thread_id,
-        'stats': state
-    }
-
-def get_skip_reason(key_hex):
-    last_17 = key_hex[-17:]
-    
-    if len(set(last_17)) < FILTER_CONFIG['min_unique_chars']:
-        return 'unique_chars'
-    if has_repeating_chars(last_17, FILTER_CONFIG['max_repeat_chars']):
-        return 'repeating_chars'
-    if FILTER_CONFIG['check_sequential'] and (is_sequential(last_17, 1) or is_sequential(last_17, -1)):
-        return 'sequential'
-    if FILTER_CONFIG['check_symmetric'] and is_symmetric(last_17):
-        return 'symmetric'
-    return 'other'
-
-def run_hash_test():
-    try:
-        key_bytes = bytes.fromhex(TEST_KEY)
-        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
-        sha256_hash = hashlib.sha256(pub_key).digest()
-        ripemd160 = hashlib.new('ripemd160', sha256_hash).hexdigest()
-        return ripemd160 == TEST_HASH
-    except Exception as e:
-        print(f"{COLOR['red']}Ошибка в тесте: {str(e)}{COLOR['reset']}")
-        return False
-
-def main():
-    display = ConsoleDisplay(NUM_THREADS)
-    display.init_display()
-    
-    # Run and display test
-    test_passed = run_hash_test()
-    display.update_test_info(test_passed)
-    display.update_config()
-    
-    if not test_passed:
-        print(f"\n{COLOR['red']}Тест хеширования не пройден. Проверьте настройки.{COLOR['reset']}")
-        return
-    
-    chunk_size = (END_RANGE - START_RANGE) // NUM_THREADS
-    ranges = []
-    for i in range(NUM_THREADS):
-        start = START_RANGE + i * chunk_size
-        end = start + chunk_size - 1 if i < NUM_THREADS - 1 else END_RANGE
-        ranges.append((i, start, end))
-    
-    start_time = time.time()
-    found_key = None
-    
-    with ProcessPoolExecutor(max_workers=NUM_THREADS) as executor:
-        futures = [executor.submit(worker, *args) for args in ranges]
-        
-        try:
-            while True:
-                time.sleep(0.1)
-                
-                # Update display with partial results
-                for i, future in enumerate(futures):
-                    try:
-                        if not future.done() and future._result:
-                            result = future._result
-                            key_hex = result['last_key']
-                            pub_key = coincurve.PublicKey.from_secret(bytes.fromhex(key_hex)).format(compressed=True)
-                            h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
-                            display.update_thread(
-                                i, 
-                                key_hex, 
-                                h,
-                                result['processed'],
-                                result['interesting_keys']
-                            )
-                    except:
-                        pass
-                
-                # Update stats
-                found = display.update_stats(futures, start_time)
-                
-                if found:
-                    for future in futures:
-                        if future.done() and future.result().get('status') == 'found':  # Исправлено: добавлена проверка .get()
-                            found_key = future.result()['key']
-                            break
-                    break
-                    
-                if all(future.done() for future in futures):
-                    break
-                    
-        except KeyboardInterrupt:
-            display.print_at('progress_start+3', f"{COLOR['yellow']}Остановлено пользователем{COLOR['reset']}")
-    
-    if found_key:
-        display.print_at('progress_start+3', f"{COLOR['green']}{'='*60}")
-        display.print_at('progress_start+4', f"{'КЛЮЧ НАЙДЕН!':^60}")
-        display.print_at('progress_start+5', f"{'='*60}{COLOR['reset']}")
-        display.print_at('progress_start+6', f"{COLOR['bold']}Приватный ключ:{COLOR['reset']} {COLOR['green']}{found_key}{COLOR['reset']}")
-        
-        key_bytes = bytes.fromhex(found_key)
-        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
-        h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
-        display.print_at('progress_start+7', f"{COLOR['bold']}Найденный хеш:{COLOR['reset']} {h}")
-        display.print_at('progress_start+8', f"{COLOR['bold']}Ожидаемый хеш:{COLOR['reset']} {TARGET_HASH}")
-        display.print_at('progress_start+9', f"{COLOR['green']}{'='*60}{COLOR['reset']}")
-        
-        # Cleanup progress files
-        for i in range(NUM_THREADS):
-            try:
-                os.remove(f'progress_thread_{i}.pkl')
-            except:
-                pass
-
-    # Move cursor to end of output
-    print(f"\033[{display.line_map['progress_start']+20};0H")
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"{COLOR['red']}Критическая ошибка: {str(e)}{COLOR['reset']}")
-        sys.exit(1)
+            key_bytes = bytes.fromhex(key
