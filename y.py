@@ -145,7 +145,8 @@ class AnalyticsDisplay:
 
     def update_thread(self, thread_id, key_hex, current_hash, processed, speed):
         line = self.thread_lines[thread_id]
-        short_key = key_hex[-16:] if len(key_hex) > 16 else key_hex
+        # Отображаем последние 18 символов ключа (64-18=46)
+        short_key = key_hex[46:] if len(key_hex) >= 64 else key_hex
         short_hash = f"{current_hash[:8]}..{current_hash[-6:]}" if current_hash else '...вычисляется...'
         print(f"\033[{line};0H\033[K"
               f"{thread_id:<4}0x{short_key:<18} {short_hash:<20} "
@@ -373,7 +374,12 @@ def main():
     for i in range(NUM_THREADS):
         try:
             with open(f'progress_thread_{i}.pkl', 'rb') as f:
-                initial_states.append(pickle.load(f))
+                state = pickle.load(f)
+                # Проверяем, что сохраненное состояние в нужном диапазоне
+                if state['current'] >= START_RANGE and state['current'] <= END_RANGE:
+                    initial_states.append(state)
+                else:
+                    initial_states.append(None)
                 os.remove(f'progress_thread_{i}.pkl')
         except:
             initial_states.append(None)
