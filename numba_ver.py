@@ -22,59 +22,103 @@ TARGET_HASH = "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"
 START_RANGE = 0x600000000000000000
 END_RANGE = 0x800000000000000000
 NUM_THREADS = 12
-
-# Настройки производительности
 MIN_UPDATE_INTERVAL = 2.0
 PROGRESS_UPDATE_ITERATIONS = 1000
 
+# Паттерны для пропуска
+REPEAT_PATTERNS = ['aaaa', '5555', '0000', 'ffff', 'cccc']
+SEQUENTIAL_PATTERNS = ['0123', '1234', 'abcd', 'bcde']
+
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
+
 @jit(nopython=True)
-def should_skip_key_numba(key_hex):
+def has_quick_skip_pattern(key_hex):
+    """Быстрая проверка очевидных паттернов с использованием Numba"""
+    last_12 = key_hex[-12:]
+    
+    # Проверка 4+ повторяющихся символов
+    for i in range(len(last_12)-3):
+        if last_12[i] == last_12[i+1] == last_12[i+2] == last_12[i+3]:
+            return True
+    
+    # Проверка последовательностей
+    for i in range(len(last_12)-3):
+        chunk = last_12[i:i+4]
+        if chunk.isdigit():
+            valid = True
+            for j in range(3):
+                if ord(chunk[j+1]) != ord(chunk[j]) + 1:
+                    valid = False
+                    break
+            if valid:
+                return True
+        elif chunk.islower():
+            valid = True
+            for j in range(3):
+                if ord(chunk[j+1]) != ord(chunk[j]) + 1:
+                    valid = False
+                    break
+            if valid:
+                return True
+    
+    return False
+
+def calculate_jump(key_hex):
+    """Вычисляет безопасный прыжок через невалидные диапазоны"""
+    original = int(key_hex, 16)
     last_17 = key_hex[-17:]
     
-    # Проверка на 4+ повторяющихся символа
-    count = 1
-    prev = last_17[0]
-    for c in last_17[1:]:
-        if c == prev:
-            count += 1
-            if count >= 4:
-                return True
-        else:
-            count = 1
-            prev = c
+    max_pattern_len = 0
+    jump_pos = len(last_17)
     
-    # Проверка на 5+ цифр или букв подряд
-    seq_len = 1
-    for i in range(1, len(last_17)):
-        if (last_17[i].isdigit() and last_17[i-1].isdigit()) or \
-           (last_17[i].islower() and last_17[i-1].islower()):
-            seq_len += 1
-            if seq_len >= 5:
-                return True
-        else:
-            seq_len = 1
+    # Проверка известных паттернов
+    for pattern in REPEAT_PATTERNS:
+        pos = last_17.find(pattern)
+        if pos != -1 and len(pattern) > max_pattern_len:
+            max_pattern_len = len(pattern)
+            jump_pos = pos
     
-    # Проверка на все цифры или все буквы
-    all_digits = True
-    all_letters = True
-    for c in last_17:
-        if not c.isdigit():
-            all_digits = False
-        if not c.islower():
-            all_letters = False
-        if not all_digits and not all_letters:
-            break
+    for pattern in SEQUENTIAL_PATTERNS:
+        pos = last_17.find(pattern)
+        if pos != -1 and len(pattern) > max_pattern_len:
+            max_pattern_len = len(pattern)
+            jump_pos = pos
     
-    return all_digits or all_letters
+    if max_pattern_len >= 4:
+        jump_value = 16 ** (16 - jump_pos)
+        # Ограничиваем максимальный прыжок
+        return min(original + min(jump_value, 0x100000), END_RANGE)
+    
+    # Дополнительные проверки
+    for i in range(len(last_17)-4):
+        chunk = last_17[i:i+5]
+        if chunk.isdigit() or chunk.islower():
+            return original + (16 ** (16 - i)) // 2
+    
+    return original + 1
 
 def should_skip_key(key_hex):
-    try:
-        return should_skip_key_numba(key_hex)
-    except Exception as e:
-        print(f"{Fore.RED}Ошибка в should_skip_key: {str(e)}{Style.RESET_ALL}")
-        return False
+    """Комбинированная проверка валидности ключа"""
+    if has_quick_skip_pattern(key_hex):
+        return True
+    
+    last_17 = key_hex[-17:]
+    
+    # Проверка на все цифры/буквы
+    if last_17.isdigit() or last_17.islower():
+        return True
+    
+    # Проверка на 5+ одинаковых символов
+    for i in range(len(last_17)-4):
+        if last_17[i] == last_17[i+1] == last_17[i+2] == last_17[i+3] == last_17[i+4]:
+            return True
+    
+    return False
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def run_tests():
+    """Запуск тестовых проверок"""
     print(f"\n{Fore.YELLOW}=== ТЕСТИРОВАНИЕ ===")
     print(f"{Fore.YELLOW}🔹 Запуск тестов...{Style.RESET_ALL}")
     
@@ -113,6 +157,7 @@ def run_tests():
         return False
 
 def benchmark():
+    """Тестирование производительности"""
     print(f"\n{Fore.YELLOW}=== БЕНЧМАРК ===")
     print(f"{Fore.YELLOW}🔹 Тестирование производительности...{Style.RESET_ALL}")
     test_keys = [''.join(random.choice('0123456789abcdef') for _ in range(64)) 
@@ -129,7 +174,37 @@ def benchmark():
     print(f"{Fore.YELLOW}================={Style.RESET_ALL}\n")
     return True
 
+def print_progress(progress_data):
+    """Вывод информации о прогрессе"""
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
+    print(f"{Fore.YELLOW}=== ИНФОРМАЦИЯ О СИСТЕМЕ ===")
+    print(f"Запуск на {platform.system()} с Python {sys.version.split()[0]}")
+    print(f"Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}======================={Style.RESET_ALL}\n")
+    
+    print(f"{Fore.CYAN}=== ПРОГРЕСС ПОИСКА ({NUM_THREADS} потоков) ==={Style.RESET_ALL}")
+    for tid in sorted(progress_data.keys()):
+        data = progress_data[tid]
+        key_hex = f"{data['current']:064x}"
+        last_key_display = f"0x...{key_hex[-18:]}" if len(key_hex) >= 18 else f"0x...{key_hex}"
+        
+        status = f"{Fore.GREEN}Активен" if data['active'] else f"{Fore.RED}Завершен"
+        
+        print(
+            f"{Fore.WHITE}Поток {tid:2}: {status}{Style.RESET_ALL} | "
+            f"Обработано: {Fore.GREEN}{data['processed']:7,}{Style.RESET_ALL} | "
+            f"Пропущено: {Fore.YELLOW}{data['skipped']:7,}{Style.RESET_ALL} | "
+            f"Скорость: {Fore.CYAN}{data.get('speed', 0):7,.0f}/s{Style.RESET_ALL} | "
+            f"Текущий: {Fore.MAGENTA}{last_key_display}{Style.RESET_ALL}"
+        )
+    
+    print(f"\n{Fore.YELLOW}Для выхода нажмите Ctrl+C{Style.RESET_ALL}")
+
+# ==================== ОСНОВНОЙ АЛГОРИТМ ====================
+
 def process_range(thread_id, range_start, range_end, result_queue):
+    """Обработка диапазона ключей с интеллектуальным пропуском"""
     try:
         current = range_start
         processed = 0
@@ -140,23 +215,31 @@ def process_range(thread_id, range_start, range_end, result_queue):
         while current <= range_end:
             key_hex = f"{current:064x}"
             
-            if not should_skip_key(key_hex):
-                try:
-                    pub_key = coincurve.PublicKey.from_secret(bytes.fromhex(key_hex)).format(compressed=True)
-                    h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
-                    
-                    if h == TARGET_HASH:
-                        result_queue.put(('found', key_hex))
-                        return
-                    
-                    processed += 1
-                    processed_since_update += 1
-                except Exception as e:
+            if should_skip_key(key_hex):
+                jump_to = calculate_jump(key_hex)
+                if jump_to > current + 1000:  # Прыгаем только для больших блоков
+                    skipped += (jump_to - current)
+                    current = jump_to
+                    continue
+                else:
                     skipped += 1
-            else:
+                    current += 1
+                    continue
+            
+            try:
+                pub_key = coincurve.PublicKey.from_secret(bytes.fromhex(key_hex)).format(compressed=True)
+                h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
+                
+                if h == TARGET_HASH:
+                    result_queue.put(('found', key_hex))
+                    return
+                
+                processed += 1
+                processed_since_update += 1
+            except Exception as e:
                 skipped += 1
             
-            if current % PROGRESS_UPDATE_ITERATIONS == 0:
+            if processed % PROGRESS_UPDATE_ITERATIONS == 0:
                 speed = processed_since_update / (time.time() - last_speed_update) if (time.time() - last_speed_update) > 0 else 0
                 result_queue.put(('progress', {
                     'thread_id': thread_id,
@@ -174,83 +257,54 @@ def process_range(thread_id, range_start, range_end, result_queue):
     except Exception as e:
         result_queue.put(('error', str(e)))
 
-def print_progress(progress_data):
-    os.system('cls' if os.name == 'nt' else 'clear')
-    
-    # Выводим заголовок и тестовую информацию
-    print(f"{Fore.YELLOW}=== ИНФОРМАЦИЯ О СИСТЕМЕ ===")
-    print(f"Запуск на {platform.system()} с Python {sys.version.split()[0]}")
-    print(f"Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}======================={Style.RESET_ALL}\n")
-    
-    # Выводим прогресс по потокам
-    print(f"{Fore.CYAN}=== ПРОГРЕСС ПОИСКА ({NUM_THREADS} потоков) ==={Style.RESET_ALL}")
-    for tid in sorted(progress_data.keys()):
-        data = progress_data[tid]
-        key_hex = f"{data['current']:064x}"
-        last_key_display = f"0x...{key_hex[-18:]}" if len(key_hex) >= 18 else "0x...{key_hex}"
-        
-        status = f"{Fore.GREEN}Активен" if data['active'] else f"{Fore.RED}Завершен"
-        
-        print(
-            f"{Fore.WHITE}Поток {tid:2}: {status}{Style.RESET_ALL} | "
-            f"Обработано: {Fore.GREEN}{data['processed']:7,}{Style.RESET_ALL} | "
-            f"Пропущено: {Fore.YELLOW}{data['skipped']:7,}{Style.RESET_ALL} | "
-            f"Скорость: {Fore.CYAN}{data.get('speed', 0):7,.0f}/s{Style.RESET_ALL} | "
-            f"Текущий: {Fore.MAGENTA}{last_key_display}{Style.RESET_ALL}"
-        )
-    
-    print(f"\n{Fore.YELLOW}Для выхода нажмите Ctrl+C{Style.RESET_ALL}")
-
 def main():
-    # Запускаем тесты и бенчмарк
+    """Главная функция выполнения"""
     if not run_tests():
         return
     
     if not benchmark():
         return
     
-    # Инициализация многопроцессорных структур
     manager = Manager()
     result_queue = manager.Queue()
+    progress_data = manager.dict()
     
-    # Вычисляем диапазоны для каждого потока
+    # Инициализация данных прогресса
     total = END_RANGE - START_RANGE
     chunk = total // NUM_THREADS
-    ranges = [(i, START_RANGE + i * chunk, 
-               START_RANGE + (i + 1) * chunk - 1 if i < NUM_THREADS - 1 else END_RANGE) 
-              for i in range(NUM_THREADS)]
-    
-    # Инициализируем данные для отображения прогресса
-    progress_data = {
-        tid: {
+    for tid in range(NUM_THREADS):
+        start = START_RANGE + tid * chunk
+        end = start + chunk - 1 if tid < NUM_THREADS - 1 else END_RANGE
+        progress_data[tid] = manager.dict({
+            'start': start,
+            'end': end,
             'current': start,
             'processed': 0,
             'skipped': 0,
             'speed': 0,
             'active': True
-        } for tid, start, _ in ranges
-    }
+        })
     
-    print(f"\n{Fore.YELLOW}🔹 Начало поиска с {NUM_THREADS} потоками...{Style.RESET_ALL}")
-    time.sleep(2)  # Даем время прочитать предыдущие сообщения
+    print(f"\n{Fore.YELLOW}🔹 Начало поиска с интеллектуальным пропуском...{Style.RESET_ALL}")
+    time.sleep(2)
     
     try:
         with ProcessPoolExecutor(max_workers=NUM_THREADS) as executor:
-            # Запускаем потоки
-            futures = [executor.submit(process_range, tid, start, end, result_queue) 
-                      for tid, start, end in ranges]
+            futures = [executor.submit(process_range, tid, 
+                                     progress_data[tid]['start'],
+                                     progress_data[tid]['end'],
+                                     result_queue) 
+                      for tid in range(NUM_THREADS)]
             
             active_threads = NUM_THREADS
-            last_update_time = 0
+            last_print_time = 0
             
             while active_threads > 0:
-                # Обрабатываем сообщения из очереди
                 while not result_queue.empty():
                     msg_type, data = result_queue.get_nowait()
                     
                     if msg_type == 'found':
-                        print(f"\n{Fore.GREEN}🎉 КЛЮЧ НАЙДЕН: 0x{data}{Style.RESET_ALL}")
+                        print(f"\n{Fore.GREEN}🎉 Ключ найден: 0x{data}{Style.RESET_ALL}")
                         for tid in progress_data:
                             progress_data[tid]['active'] = False
                         return
@@ -269,12 +323,11 @@ def main():
                         active_threads -= 1
                         
                     elif msg_type == 'error':
-                        print(f"{Fore.RED}❌ Ошибка в потоке: {data}{Style.RESET_ALL}")
+                        print(f"{Fore.RED}Ошибка в потоке: {data}{Style.RESET_ALL}")
                 
-                # Обновляем экран каждые MIN_UPDATE_INTERVAL секунд
-                if time.time() - last_update_time >= MIN_UPDATE_INTERVAL:
+                if time.time() - last_print_time >= MIN_UPDATE_INTERVAL:
                     print_progress(progress_data)
-                    last_update_time = time.time()
+                    last_print_time = time.time()
                 
                 time.sleep(0.1)
             
