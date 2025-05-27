@@ -18,7 +18,7 @@ TEST_KEY = "0000000000000000000000000000000000000000000000000000000000000001"
 TEST_HASH = "751e76e8199196d454941c45d1b3a323f1433bd6"
 TARGET_HASH = "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"
 START_RANGE = 0x600000000000000000
-END_RANGE = 0x800000000000000000
+END_RANGE = 0x700000000000000000
 NUM_THREADS = max(8, os.cpu_count() + 6)  # Автоподбор потоков
 MIN_UPDATE_INTERVAL = 1.0
 
@@ -91,10 +91,10 @@ def calculate_jump(key_hex, thread_id):
     new_pos = original + jump_size
     
     # Логирование только больших прыжков
-    if jump_size >= 0x1000:
+    if jump_size >= 0x100000:
         print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} "
               f"при {max_repeat} повторениях: "
-              f"0x...{key_hex[-8:]} → 0x...{f'{new_pos:x}'[-8:]}{Style.RESET_ALL}")
+              f"0x{key_hex[-18:]} → 0x{f'{new_pos:x}'[-18:]}{Style.RESET_ALL}")
     
     return min(new_pos, END_RANGE)
 
