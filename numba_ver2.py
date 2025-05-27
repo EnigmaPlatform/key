@@ -16,10 +16,10 @@ init()
 # Конфигурация
 TEST_KEY = "0000000000000000000000000000000000000000000000000000000000000001"
 TEST_HASH = "751e76e8199196d454941c45d1b3a323f1433bd6"
-TARGET_HASH = "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8"
-START_RANGE = 0x600000000000000000
-END_RANGE = 0x800000000000000000
-NUM_THREADS = max(4, os.cpu_count() - 2)  # Автоподбор потоков
+TARGET_HASH = "5db8cda53a6a002db10365967d7f85d19e171b10"
+START_RANGE = 0x349b84b6431a5c4ef1
+END_RANGE = 0x349b84b6431a6c4ef9
+NUM_THREADS = max(8, os.cpu_count() + 4)  # Автоподбор потоков
 MIN_UPDATE_INTERVAL = 1.0
 
 # ==================== УЛУЧШЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ====================
@@ -78,7 +78,7 @@ def calculate_jump(key_hex, thread_id):
     
     # Размер прыжка зависит от количества повторений
     if max_repeat >= 12:
-        jump_size = 0x100000  # 1,048,576 ключей для очень длинных повторов
+        jump_size = 0x10000000  # 1,048,576 ключей для очень длинных повторов
     elif max_repeat >= 8:
         jump_size = 0x10000   # 65,536 ключей
     elif max_repeat >= 6:
