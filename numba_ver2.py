@@ -77,16 +77,16 @@ def calculate_jump(key_hex, thread_id):
         prev_char = c
     
     # Размер прыжка зависит от количества повторений
-    if max_repeat >= 14:
-        return 0x10000000000  # 68.7 млрд ключей
-    elif max_repeat >= 10:
-        return 0x100000000    # 4.3 млрд ключей
-    elif max_repeat >= 7:
-        return 0x1000000      # 16.8 млн ключей
-    elif max_repeat >= 5:
-        return 0x10000        # 65K ключей
+    if max_repeat >= 12:
+        jump_size = 0x100000000  # 1,048,576 ключей для очень длинных повторов
+    elif max_repeat >= 8:
+        jump_size = 0x1000000   # 65,536 ключей
+    elif max_repeat >= 6:
+        jump_size = 0x10000    # 4,096 ключей
     elif max_repeat >= 4:
-        return 0x1000         # 4K ключей
+        jump_size = 0x100     # 256 ключей
+    else:
+        return original + 1   # Без прыжка
     
     new_pos = original + jump_size
     
