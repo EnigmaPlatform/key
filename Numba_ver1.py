@@ -19,7 +19,7 @@ init()
 CONFIG = {
     "target_hash": "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8",
     "start_range": 0x600000000000000000,
-    "end_range": 0x6f0000000000000000,
+    "end_range": 0x699999999999999999,
     "num_threads": max(8, os.cpu_count() + 4),
     "update_interval": 2.0,
     "state_file": "search_state.json",
