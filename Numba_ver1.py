@@ -17,8 +17,8 @@ init()
 # Конфигурация
 CONFIG = {
     "target_hash": "5db8cda53a6a002db10365967d7f85d19e171b10",
-    "start_range": 0x349b84b643196c4ef1,
-    "end_range": 0x349b84b6432a6c4ef1,
+    "start_range": 0x349b84b6431a5c4ef1,
+    "end_range": 0x349b84b6431a6c4ef9,
     "num_threads": max(8, os.cpu_count() + 6),
     "update_interval": 2.0,
     "state_file": "search_state.json"
