@@ -46,7 +46,6 @@ class BackupManager:
             with open(backup_file, 'w') as f:
                 json.dump(state_data, f, indent=2)
             
-            # Удаляем старые бэкапы, если их больше max_backups
             backups = sorted(
                 [f for f in os.listdir(CONFIG['backup_dir']) if f.startswith('backup_')],
                 reverse=True
@@ -81,7 +80,7 @@ class AdaptiveSystem:
         try:
             X = np.array([
                 [stat['jump_size'], stat['speed_gain']] 
-                for stat in self.pattern_stats[-1000:]  # Берем последние 1000 записей
+                for stat in self.pattern_stats[-1000:]
             ])
             
             self.kmeans.fit(X)
@@ -133,9 +132,9 @@ def analyze_17_chars(key_hex):
     last_17 = key_hex[-17:] if len(key_hex) >= 17 else key_hex.zfill(17)[-17:]
     
     zones = {
-        'high_priority': last_17[:6],   # 6 старших из 17
-        'mid_priority': last_17[6:12],  # 6 средних
-        'low_priority': last_17[12:]    # 5 младших
+        'high_priority': last_17[:6],
+        'mid_priority': last_17[6:12],
+        'low_priority': last_17[12:]
     }
     
     checks = {
@@ -173,7 +172,7 @@ def calculate_jump(key_hex, thread_id, jump_counter):
     # 1. Высокоприоритетные паттерны
     hp_pattern = detect_high_priority_pattern(zones['high_priority'])
     if hp_pattern:
-        jump_size = 0x1000000000  # ~68.7B ключей
+        jump_size = 0x1000000000
         jump_type = 'high_priority'
         speed_gain = jump_size / 1000
         jump_counter.increment(jump_type, jump_size, speed_gain)
@@ -184,7 +183,7 @@ def calculate_jump(key_hex, thread_id, jump_counter):
     # 2. Среднеприоритетные паттерны
     mp_pattern = detect_mid_priority_pattern(zones['mid_priority'])
     if mp_pattern:
-        jump_size = 0x1000000  # ~16.7M ключей
+        jump_size = 0x1000000
         jump_type = 'mid_priority'
         speed_gain = jump_size / 100
         jump_counter.increment(jump_type, jump_size, speed_gain)
@@ -194,13 +193,13 @@ def calculate_jump(key_hex, thread_id, jump_counter):
     
     # 3. Блоки цифр/букв
     if checks['all_digits']:
-        jump_size = 0x10000  # ~65K ключей
+        jump_size = 0x10000
         jump_type = 'digit_blocks'
         speed_gain = jump_size / 10
         jump_counter.increment(jump_type, jump_size, speed_gain)
         return original + jump_size
     elif checks['all_alpha']:
-        jump_size = 0x1000  # ~4K ключей
+        jump_size = 0x1000
         jump_type = 'alpha_blocks'
         speed_gain = jump_size / 5
         jump_counter.increment(jump_type, jump_size, speed_gain)
@@ -245,7 +244,8 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
     chunk_size = end - start
     chunk_start_time = time.time()
     last_update = chunk_start_time
-    processed = 0
+    actually_checked = 0  # Счетчик реально проверенных ключей
+    total_processed = 0   # Счетчик всех обработанных ключей (включая пропущенные)
     local_jumps = 0
     total_operations = 0
     
@@ -255,13 +255,18 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
         
         prev_current = current
         current = calculate_jump(key_hex, thread_id, jump_counter)
+        
+        # Учитываем прыжки
         if current > prev_current + 1:
+            jump_size = current - prev_current
+            total_processed += jump_size
             local_jumps += 1
             result_queue.put(('progress', {
                 'thread_id': thread_id,
                 'current': current,
                 'last_key': key_hex,
-                'processed': processed,
+                'actually_checked': actually_checked,
+                'total_processed': total_processed,
                 'operations': total_operations,
                 'percent': (current - start) / chunk_size * 100,
                 'elapsed': time.time() - chunk_start_time,
@@ -278,9 +283,11 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
                 result_queue.put(('found', (thread_id, key_hex)))
                 return
             
-            processed += 1
+            actually_checked += 1
+            total_processed += 1
         except Exception as e:
             print(f"{Fore.RED}[Поток {thread_id}] Ошибка: {e}{Style.RESET_ALL}")
+            total_processed += 1
         
         now = time.time()
         if now - last_update >= CONFIG['update_interval']:
@@ -288,7 +295,8 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
                 'thread_id': thread_id,
                 'current': current,
                 'last_key': key_hex,
-                'processed': processed,
+                'actually_checked': actually_checked,
+                'total_processed': total_processed,
                 'operations': total_operations,
                 'percent': (current - start) / chunk_size * 100,
                 'elapsed': now - chunk_start_time,
@@ -303,12 +311,14 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
 def print_status(stats, last_keys, jump_counter):
     os.system('cls' if os.name == 'nt' else 'clear')
     
-    actual_speed = stats['processed'] / stats['elapsed'] if stats['elapsed'] > 0 else 0
+    actual_speed = stats['total_processed'] / stats['elapsed'] if stats['elapsed'] > 0 else 0
+    check_speed = stats['actually_checked'] / stats['elapsed'] if stats['elapsed'] > 0 else 0
     ops_speed = stats['operations'] / stats['elapsed'] if stats['elapsed'] > 0 else 0
     
     print(f"{Fore.CYAN}=== ИНФОРМАЦИЯ О ПОИСКЕ ==={Style.RESET_ALL}")
-    print(f"Потоков: {CONFIG['num_threads']} | Скорость: {actual_speed:,.0f} ключей/сек ({ops_speed:,.0f} опер/сек)")
-    print(f"Обработано: {stats['processed']:,} ключей | Прогресс: {stats['percent']:.12f}%")
+    print(f"Потоков: {CONFIG['num_threads']} | Скорость: {actual_speed:,.0f} ключ/сек (всего)")
+    print(f"Проверок: {check_speed:,.0f} ключ/сек | Операций: {ops_speed:,.0f} опер/сек")
+    print(f"Проверено: {stats['actually_checked']:,} | Всего: {stats['total_processed']:,} | Прогресс: {stats['percent']:.8f}%")
     print(f"Прошло времени: {stats['elapsed']/60:.1f} минут")
     
     print(f"\n{Fore.YELLOW}СТАТИСТИКА ПРЫЖКОВ:{Style.RESET_ALL}")
@@ -363,8 +373,9 @@ def load_state():
             state = json.load(f)
         
         print(f"\n{Fore.CYAN}=== СОХРАНЕННОЕ СОСТОЯНИЕ ===")
-        print(f"Прогресс: {state.get('percent', 0):.12f}%")
-        print(f"Обработано: {state.get('processed', 0):,} ключей")
+        print(f"Прогресс: {state.get('percent', 0):.8f}%")
+        print(f"Проверено: {state.get('actually_checked', 0):,} ключей")
+        print(f"Всего обработано: {state.get('total_processed', 0):,} ключей")
         print(f"Прыжков: {state.get('total_jumps', 0):,}")
         print(f"Позиции потоков:{Style.RESET_ALL}")
         for tid, pos in enumerate(state.get('positions', [])):
@@ -386,14 +397,15 @@ def load_state():
         print(f"{Fore.RED}Ошибка загрузки: {e}{Style.RESET_ALL}")
         return None
 
-def save_state(positions, processed, jump_counter):
+def save_state(positions, stats, jump_counter):
     backup_mgr = BackupManager()
     temp_file = CONFIG['state_file'] + ".tmp"
     
     try:
         state_data = {
             'positions': [f"{pos:064x}" for pos in positions],
-            'processed': processed.value if hasattr(processed, 'value') else processed,
+            'actually_checked': stats['actually_checked'].value if hasattr(stats['actually_checked'], 'value') else stats['actually_checked'],
+            'total_processed': stats['total_processed'].value if hasattr(stats['total_processed'], 'value') else stats['total_processed'],
             'total_jumps': jump_counter.total_jumps.value,
             'jump_stats': {k: v.value for k, v in jump_counter.jump_stats.items()},
             'timestamp': time.time(),
@@ -401,18 +413,14 @@ def save_state(positions, processed, jump_counter):
             'config': CONFIG
         }
         
-        # Основное сохранение
         with open(temp_file, 'w') as f:
             json.dump(state_data, f, indent=2)
         
-        # Проверка целостности
         with open(temp_file, 'r') as f:
             json.load(f)
         
-        # Создание бэкапа
         backup_mgr.create_backup(state_data)
         
-        # Финализация сохранения
         if os.path.exists(CONFIG['state_file']):
             os.remove(CONFIG['state_file'])
         os.rename(temp_file, CONFIG['state_file'])
@@ -431,10 +439,10 @@ def calculate_percentage(positions):
     progress = sum(pos - CONFIG['start_range'] for pos in positions) / total_range
     return (progress / CONFIG['num_threads']) * 100
 
-def setup_signal_handlers(positions, processed, jump_counter):
+def setup_signal_handlers(positions, stats, jump_counter):
     def signal_handler(sig, frame):
         print(f"\n{Fore.YELLOW}Сохранение состояния...{Style.RESET_ALL}")
-        save_state(positions, processed, jump_counter)
+        save_state(positions, stats, jump_counter)
         print(f"{Fore.GREEN}Сохранено. Выход.{Style.RESET_ALL}")
         os._exit(0)
     
@@ -448,8 +456,17 @@ def main():
     manager = Manager()
     result_queue = manager.Queue()
     last_keys = manager.dict()
-    total_processed = manager.Value('i', state['processed'] if state else 0)
-    total_operations = manager.Value('i', 0)
+    
+    # Инициализация статистики
+    stats = {
+        'actually_checked': manager.Value('i', state['actually_checked'] if state else 0),
+        'total_processed': manager.Value('i', state['total_processed'] if state else 0),
+        'operations': manager.Value('i', 0),
+        'percent': 0.0,
+        'elapsed': 0.0,
+        'speed': 0.0
+    }
+    
     jump_counter = JumpCounter(manager)
     backup_mgr = BackupManager()
     
@@ -469,15 +486,7 @@ def main():
         print(f"{Fore.GREEN}[Инициализация] Поток {tid} начинается с 0x{positions[tid]:064x}{Style.RESET_ALL}")
     
     start_time = time.time()
-    stats = {
-        'processed': total_processed.value,
-        'speed': 0,
-        'percent': calculate_percentage(positions),
-        'elapsed': 0,
-        'operations': 0
-    }
-    
-    setup_signal_handlers(positions, total_processed, jump_counter)
+    setup_signal_handlers(positions, stats, jump_counter)
     
     try:
         with ProcessPoolExecutor(max_workers=CONFIG['num_threads']) as executor:
@@ -507,16 +516,15 @@ def main():
                     elif msg_type == 'progress':
                         tid = data['thread_id']
                         last_keys[tid] = data['last_key']
-                        total_processed.value += data['processed']
-                        total_operations.value += data['operations']
+                        stats['actually_checked'].value += data['actually_checked']
+                        stats['total_processed'].value += data['total_processed']
+                        stats['operations'].value += data['operations']
                         positions[tid] = data['current']
                         
                         stats.update({
-                            'processed': total_processed.value,
-                            'operations': total_operations.value,
                             'percent': calculate_percentage(positions),
                             'elapsed': time.time() - start_time,
-                            'speed': total_processed.value / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
+                            'speed': stats['total_processed'].value / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
                         })
                     
                     elif msg_type == 'done':
@@ -524,11 +532,18 @@ def main():
                 
                 current_time = time.time()
                 if current_time - last_update_time >= CONFIG['update_interval']:
-                    print_status(stats, dict(last_keys), jump_counter)
+                    print_status({
+                        'actually_checked': stats['actually_checked'].value,
+                        'total_processed': stats['total_processed'].value,
+                        'operations': stats['operations'].value,
+                        'percent': stats['percent'],
+                        'elapsed': stats['elapsed'],
+                        'speed': stats['speed']
+                    }, dict(last_keys), jump_counter)
                     last_update_time = current_time
                 
                 if current_time - last_save_time > CONFIG['backup_interval']:
-                    if save_state(positions, total_processed, jump_counter):
+                    if save_state(positions, stats, jump_counter):
                         last_save_time = current_time
                         print(f"\n{Fore.GREEN}Автосохранение выполнено.{Style.RESET_ALL}")
                 
@@ -541,7 +556,7 @@ def main():
     except Exception as e:
         print(f"\n{Fore.RED}Ошибка: {str(e)}{Style.RESET_ALL}")
         traceback.print_exc()
-        save_state(positions, total_processed, jump_counter)
+        save_state(positions, stats, jump_counter)
 
 if __name__ == "__main__":
     freeze_support()
