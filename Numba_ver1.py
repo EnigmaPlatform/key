@@ -85,7 +85,7 @@ def calculate_jump(key_hex, thread_id, jump_counter):
     jump_counter.increment(jump_type)
     new_pos = original + jump_size
     
-    if jump_size >= 0x10000:
+    if jump_size >= 0x100:
         print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} ключей ({jump_type}): "
               f"0x{key_hex[-18:]} → 0x{f'{new_pos:x}'[-18:]}{Style.RESET_ALL}")
     
@@ -398,3 +398,4 @@ def main():
 if __name__ == "__main__":
     freeze_support()
     main()
+
