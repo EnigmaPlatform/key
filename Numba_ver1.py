@@ -17,7 +17,7 @@ init()
 # Конфигурация
 CONFIG = {
     "target_hash": "5db8cda53a6a002db10365967d7f85d19e171b10",
-    "start_range": 0x349b84b60000000000,
+    "start_range": 0x349b84b6430a5c4ef9,
     "end_range": 0x349b84b6431a6c4ef9,
     "num_threads": max(8, os.cpu_count() + 6),
     "update_interval": 2.0,
@@ -60,9 +60,9 @@ def calculate_jump(key_hex, thread_id):
     
     new_pos = original + jump_size
     
-    if jump_size >= 0x1000000:
+    if jump_size >= 0x10000:
         print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} ключей: "
-              f"0x{key_hex[-12:]}... → 0x{f'{new_pos:x}'[-12:]}...{Style.RESET_ALL}")
+              f"0x{key_hex[-18:]} → 0x{f'{new_pos:x}'[-18:]}{Style.RESET_ALL}")
     
     return min(new_pos, CONFIG['end_range'])
 
@@ -171,12 +171,12 @@ def print_status(stats, last_keys):
     
     print(f"{Fore.CYAN}=== ИНФОРМАЦИЯ О ПОИСКЕ ==={Style.RESET_ALL}")
     print(f"Потоков: {CONFIG['num_threads']} | Скорость: {stats['speed']:,.0f} ключей/сек")
-    print(f"Обработано: {stats['processed']:,} ключей | Прогресс: {stats['percent']:.6f}%")
+    print(f"Обработано: {stats['processed']:,} ключей | Прогресс: {stats['percent']:.18f}%")
     print(f"Прошло времени: {stats['elapsed']/60:.1f} минут")
     
     print(f"\n{Fore.YELLOW}ПОСЛЕДНИЕ ПРОВЕРЕННЫЕ КЛЮЧИ:{Style.RESET_ALL}")
     for tid in sorted(last_keys.keys()):
-        print(f"Поток {tid:2}: 0x{last_keys[tid][-16:]}...")
+        print(f"Поток {tid:2}: 0x{last_keys[tid][-18:]}")
     
     if stats['percent'] > 0:
         remaining = (100 - stats['percent']) * stats['elapsed'] / stats['percent']
