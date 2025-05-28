@@ -4,264 +4,359 @@ import coincurve
 from concurrent.futures import ProcessPoolExecutor
 import time
 import os
-import random
+import json
 from numba import jit
 import traceback
 from multiprocessing import Manager, freeze_support
 from colorama import init, Fore, Back, Style
+import sys
 
 # Инициализация colorama
 init()
 
 # Конфигурация
-TEST_KEY = "0000000000000000000000000000000000000000000000000000000000000001"
-TEST_HASH = "751e76e8199196d454941c45d1b3a323f1433bd6"
-TARGET_HASH = "5db8cda53a6a002db10365967d7f85d19e171b10"
-START_RANGE = 0x349b84b643196c4ef1
-END_RANGE = 0x349b84b6431a6c4ef1
-NUM_THREADS = max(8, os.cpu_count() + 6)  # Автоподбор потоков
-MIN_UPDATE_INTERVAL = 1.0
+CONFIG = {
+    "target_hash": "5db8cda53a6a002db10365967d7f85d19e171b10",
+    "start_range": 0x349b84b643196c4ef1,
+    "end_range": 0x349b84b6432a6c4ef1,
+    "num_threads": max(8, os.cpu_count() + 6),
+    "update_interval": 2.0,
+    "state_file": "search_state.json"
+}
 
-# ==================== УЛУЧШЕННЫЕ ФУНКЦИИ ПРОВЕРКИ ====================
+def run_benchmark():
+    """Запуск комплексного бенчмарка системы"""
+    print(f"\n{Fore.CYAN}=== ЗАПУСК БЕНЧМАРКА ==={Style.RESET_ALL}")
+    
+    # Тест SHA256 + RIPEMD160
+    test_data = os.urandom(32)
+    start = time.time()
+    count = 0
+    while time.time() - start < 2.0:
+        hashlib.new('ripemd160', hashlib.sha256(test_data).digest())
+        count += 1
+    hash_speed = count / 2.0
+    
+    # Тест ECC операций
+    start = time.time()
+    count = 0
+    while time.time() - start < 2.0:
+        coincurve.PublicKey.from_secret(test_data).format(compressed=True)
+        count += 1
+    ecc_speed = count / 2.0
+    
+    # Тест полного цикла
+    test_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+    start = time.time()
+    count = 0
+    while time.time() - start < 2.0:
+        key_bytes = bytes.fromhex(test_key)
+        pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+        hashlib.new('ripemd160', hashlib.sha256(pub_key).digest())
+        count += 1
+    full_cycle_speed = count / 2.0
+    
+    print(f"{Fore.GREEN}Результаты бенчмарка:{Style.RESET_ALL}")
+    print(f"Хеширование (SHA256+RIPEMD160): {hash_speed:,.0f} операций/сек")
+    print(f"ECC операции: {ecc_speed:,.0f} операций/сек")
+    print(f"Полный цикл проверки ключа: {full_cycle_speed:,.0f} операций/сек")
+    
+    # Прогноз производительности
+    total_speed = full_cycle_speed * CONFIG['num_threads']
+    total_keys = CONFIG['end_range'] - CONFIG['start_range']
+    est_time = total_keys / total_speed if total_speed > 0 else 0
+    
+    print(f"\n{Fore.YELLOW}Прогноз для {CONFIG['num_threads']} потоков:{Style.RESET_ALL}")
+    print(f"Общая скорость: {total_speed:,.0f} ключей/сек")
+    print(f"Примерное время проверки диапазона: {est_time/3600:.1f} часов")
+    
+    return {
+        'hash_speed': hash_speed,
+        'ecc_speed': ecc_speed,
+        'full_cycle_speed': full_cycle_speed,
+        'total_speed': total_speed,
+        'timestamp': time.time()
+    }
+
+def load_state():
+    """Загрузка состояния из файла с подтверждением пользователя"""
+    if not os.path.exists(CONFIG['state_file']):
+        return None
+        
+    print(f"\n{Fore.YELLOW}Обнаружен файл сохранения: {CONFIG['state_file']}{Style.RESET_ALL}")
+    while True:
+        choice = input("Хотите продолжить с предыдущего места? (y/n): ").strip().lower()
+        if choice in ('y', 'n'):
+            break
+        print(f"{Fore.RED}Пожалуйста, введите 'y' или 'n'{Style.RESET_ALL}")
+    
+    if choice == 'y':
+        try:
+            with open(CONFIG['state_file'], 'r') as f:
+                state = json.load(f)
+                
+            # Проверяем структуру файла состояния
+            if not isinstance(state, dict) or 'positions' not in state or 'processed' not in state:
+                raise ValueError("Неверный формат файла состояния")
+                
+            # Проверяем совместимость конфигурации
+            if 'config' in state and (state['config']['target_hash'] != CONFIG['target_hash'] or 
+                                    state['config']['end_range'] != CONFIG['end_range']):
+                raise ValueError("Конфигурация в файле состояния не совпадает с текущей")
+                
+            # Преобразуем позиции в список, если это словарь
+            if isinstance(state['positions'], dict):
+                state['positions'] = [state['positions'][str(k)] for k in range(len(state['positions']))]
+                
+            print(f"{Fore.GREEN}Загружено сохраненное состояние{Style.RESET_ALL}")
+            return state
+        except Exception as e:
+            print(f"{Fore.RED}Ошибка загрузки состояния: {e}{Style.RESET_ALL}")
+            traceback.print_exc()
+            return None
+    return None
+
+def save_state(current_positions, processed_keys):
+    """Сохранение текущего состояния в файл"""
+    # Преобразуем позиции в список для сохранения
+    positions_list = [current_positions[i] for i in range(len(current_positions))]
+    
+    state = {
+        'positions': positions_list,
+        'processed': processed_keys,
+        'timestamp': time.time(),
+        'config': CONFIG
+    }
+    
+    try:
+        with open(CONFIG['state_file'], 'w') as f:
+            json.dump(state, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"{Fore.RED}Ошибка сохранения состояния: {e}{Style.RESET_ALL}")
+        return False
 
 @jit(nopython=True)
 def detect_repeats(key_hex):
-    """Агрессивное обнаружение повторений с Numba"""
+    """Оптимизированная проверка повторений"""
     max_repeats = 1
-    current_repeats = 1
-    prev_char = key_hex[0]
-    
-    for c in key_hex[1:]:
-        if c == prev_char:
-            current_repeats += 1
-            if current_repeats > max_repeats:
-                max_repeats = current_repeats
-                if max_repeats >= 17:  # Максимально возможный повтор
+    current = 1
+    for i in range(1, len(key_hex)):
+        if key_hex[i] == key_hex[i-1]:
+            current += 1
+            if current > max_repeats:
+                max_repeats = current
+                if max_repeats >= 12:
                     return max_repeats
         else:
-            current_repeats = 1
-        prev_char = c
-    
+            current = 1
     return max_repeats
 
-def should_skip_key(key_hex):
-    """Оптимизированная проверка для быстрых прыжков"""
-    # Тестовый ключ всегда проверяется
-    if key_hex == "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a":
-        return False
+def process_chunk(thread_id, start, end, result_queue):
+    """Обработка диапазона ключей с улучшенной статистикой"""
+    current = start
+    chunk_size = end - start
+    chunk_start_time = time.time()
+    last_update = chunk_start_time
+    processed = 0
+    last_position = start
     
-    # Быстрая проверка через Numba
-    repeat_count = detect_repeats(key_hex[-17:])  # Анализируем только последние 17 символов
-    if repeat_count >= 4:  # Пропускаем при 4+ повторениях
-        return True
-    
-    return False
-
-def calculate_jump(key_hex, thread_id):
-    """Максимально агрессивные прыжки с безопасными границами"""
-    original = int(key_hex, 16)
-    last_17 = key_hex[-17:]
-    
-    # Определяем максимальную последовательность повторений
-    max_repeat = 1
-    current_repeat = 1
-    prev_char = last_17[0]
-    
-    for c in last_17[1:]:
-        if c == prev_char:
-            current_repeat += 1
-            if current_repeat > max_repeat:
-                max_repeat = current_repeat
-        else:
-            current_repeat = 1
-        prev_char = c
-    
-    # Размер прыжка зависит от количества повторений
-    if max_repeat >= 12:
-        jump_size = 0x100000000  # 1,048,576 ключей для очень длинных повторов
-    elif max_repeat >= 8:
-        jump_size = 0x1000000   # 65,536 ключей
-    elif max_repeat >= 6:
-        jump_size = 0x10000    # 4,096 ключей
-    elif max_repeat >= 4:
-        jump_size = 0x100     # 256 ключей
-    else:
-        return original + 1   # Без прыжка
-    
-    new_pos = original + jump_size
-    
-    # Логирование только больших прыжков
-    if jump_size >= 0x1000:
-        print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} "
-              f"при {max_repeat} повторениях: "
-              f"0x...{key_hex[-8:]} → 0x...{f'{new_pos:x}'[-8:]}{Style.RESET_ALL}")
-    
-    return min(new_pos, END_RANGE)
-
-# ==================== ОПТИМИЗИРОВАННАЯ ОБРАБОТКА ====================
-
-def process_range(thread_id, range_start, range_end, result_queue):
-    """Максимально быстрая обработка с прыжками"""
-    try:
-        current = range_start
-        processed = 0
-        skipped = 0
-        last_update = time.time()
+    while current <= end:
+        key_hex = f"{current:064x}"
         
-        while current <= range_end:
-            key_hex = f"{current:064x}"
-            
-            if should_skip_key(key_hex):
-                jump_to = calculate_jump(key_hex, thread_id)
-                skipped += jump_to - current
-                current = jump_to
-                continue
-            
-            # Проверка ключа
+        if detect_repeats(key_hex[-16:]) < 4:
             try:
-                pub_key = coincurve.PublicKey.from_secret(bytes.fromhex(key_hex)).format(compressed=True)
+                # Полный цикл проверки
+                key_bytes = bytes.fromhex(key_hex)
+                pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
                 h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
                 
-                if h == TARGET_HASH:
+                if h == CONFIG['target_hash']:
                     result_queue.put(('found', key_hex))
                     return
                 
                 processed += 1
+                last_position = current
                 
-                # Отчет о прогрессе
-                if time.time() - last_update > 1.0:
+                # Отправляем статистику
+                now = time.time()
+                if now - last_update >= CONFIG['update_interval']:
+                    elapsed = now - chunk_start_time
+                    speed = processed / elapsed if elapsed > 0 else 0
+                    percent = (current - start) / chunk_size * 100
+                    
                     result_queue.put(('progress', {
                         'thread_id': thread_id,
                         'current': current,
+                        'last_position': last_position,
                         'processed': processed,
-                        'skipped': skipped,
-                        'speed': processed / max(1, time.time() - last_update)
+                        'speed': speed,
+                        'percent': percent,
+                        'elapsed': elapsed
                     }))
-                    last_update = time.time()
+                    last_update = now
                     
             except Exception as e:
-                skipped += 1
-            
-            current += 1
+                pass
         
-        result_queue.put(('done', thread_id))
-    except Exception as e:
-        result_queue.put(('error', {'thread_id': thread_id, 'error': str(e), 'traceback': traceback.format_exc()}))
+        current += 1
+    
+    result_queue.put(('done', thread_id))
 
-# ==================== ИНТЕРФЕЙС И ВЫВОД ====================
-
-def print_progress(progress_data, jump_history):
-    """Улучшенный вывод прогресса"""
+def print_status(benchmark, stats, current_positions):
+    """Улучшенный вывод статуса"""
     os.system('cls' if os.name == 'nt' else 'clear')
     
-    # Вывод заголовка
-    print(f"{Fore.CYAN}=== ПРОГРЕСС ПОИСКА ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}Активные потоки: {sum(1 for p in progress_data.values() if p['active'])}/{NUM_THREADS}{Style.RESET_ALL}")
+    # Общая информация
+    print(f"{Fore.CYAN}=== ИНФОРМАЦИЯ О ПОИСКЕ ==={Style.RESET_ALL}")
+    print(f"Потоков: {CONFIG['num_threads']} | Загрузка CPU: {min(100, CONFIG['num_threads'] * 100 / os.cpu_count()):.0f}%")
+    print(f"Диапазон: 0x{CONFIG['start_range']:016x} - 0x{CONFIG['end_range']:016x}")
     
-    # Вывод последних прыжков
-    print(f"\n{Fore.MAGENTA}=== ПОСЛЕДНИЕ ПРЫЖКИ ==={Style.RESET_ALL}")
-    for jump in jump_history[-3:]:
-        print(f"Поток {jump['thread_id']}: +{jump['to']-jump['from']:,} ключей (пропущено {jump['skipped']:,})")
+    # Производительность
+    print(f"\n{Fore.BLUE}=== ПРОИЗВОДИТЕЛЬНОСТЬ ==={Style.RESET_ALL}")
+    print(f"Теоретическая: {benchmark['total_speed']:,.0f} ключей/сек")
+    print(f"Фактическая: {stats['speed']:,.0f} ключей/сек")
+    print(f"Эффективность: {stats['speed']/benchmark['total_speed']*100:.1f}%")
     
-    # Статистика потоков
-    print(f"\n{Fore.BLUE}=== СТАТИСТИКА ПОТОКОВ ==={Style.RESET_ALL}")
-    for tid in sorted(progress_data.keys()):
-        data = progress_data[tid]
-        status = f"{Fore.GREEN}Активен" if data['active'] else f"{Fore.RED}Завершен"
-        print(f"Поток {tid:2}: {status}{Style.RESET_ALL} | "
-              f"Обработано: {Fore.GREEN}{data['processed']:9,}{Style.RESET_ALL} | "
-              f"Пропущено: {Fore.YELLOW}{data['skipped']:9,}{Style.RESET_ALL} | "
-              f"Скорость: {Fore.CYAN}{data.get('speed', 0):7,.0f}/s{Style.RESET_ALL}")
+    # Прогресс
+    print(f"\n{Fore.GREEN}=== ПРОГРЕСС ==={Style.RESET_ALL}")
+    print(f"Обработано: {stats['processed']:,} ключей")
+    print(f"Прогресс: {stats['percent']:.6f}%")
+    print(f"Прошло времени: {stats['elapsed']/60:.1f} минут")
     
-    print(f"\n{Fore.YELLOW}Для выхода нажмите Ctrl+C{Style.RESET_ALL}")
-
-# ==================== ОСНОВНАЯ ПРОГРАММА ====================
+    # Позиции всех потоков
+    print(f"\n{Fore.YELLOW}ТЕКУЩИЕ ПОЗИЦИИ ПОТОКОВ:{Style.RESET_ALL}")
+    for tid in sorted(current_positions.keys()):
+        pos = current_positions[tid]
+        percent = (pos - CONFIG['start_range']) / (CONFIG['end_range'] - CONFIG['start_range']) * 100
+        print(f"Поток {tid:2}: 0x{pos:016x} ({percent:.4f}%)")
+    
+    # Прогноз
+    if stats['percent'] > 0:
+        remaining = (100 - stats['percent']) * stats['elapsed'] / stats['percent']
+        print(f"\n{Fore.MAGENTA}=== ПРОГНОЗ ==={Style.RESET_ALL}")
+        print(f"Осталось времени: {remaining/3600:.1f} часов")
+        print(f"Примерное завершение: {time.ctime(time.time() + remaining)}")
+    
+    print(f"\n{Fore.WHITE}Для выхода нажмите Ctrl+C (состояние будет сохранено){Style.RESET_ALL}")
 
 def main():
-    """Главная функция выполнения"""
-    manager = Manager()
-    result_queue = manager.Queue()
-    progress_data = manager.dict()
-    jump_history = manager.list()
-    
-    # Инициализация данных прогресса
-    total_range = END_RANGE - START_RANGE
-    chunk_size = total_range // NUM_THREADS
-    
-    for tid in range(NUM_THREADS):
-        start = START_RANGE + tid * chunk_size
-        end = start + chunk_size - 1 if tid < NUM_THREADS - 1 else END_RANGE
-        progress_data[tid] = manager.dict({
-            'start': start,
-            'end': end,
-            'current': start,
-            'processed': 0,
-            'skipped': 0,
-            'speed': 0,
-            'active': True
-        })
-    
-    print(f"\n{Fore.GREEN}=== ЗАПУСК ПОИСКА ==={Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}Используется {NUM_THREADS} потоков{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}Диапазон: 0x{START_RANGE:016x} - 0x{END_RANGE:016x}{Style.RESET_ALL}")
+    """Главная функция с улучшенным управлением"""
+    # Запускаем бенчмарк
+    benchmark = run_benchmark()
     time.sleep(2)
     
-    try:
-        with ProcessPoolExecutor(max_workers=NUM_THREADS) as executor:
-            futures = [executor.submit(process_range, tid, 
-                                      progress_data[tid]['start'],
-                                      progress_data[tid]['end'],
-                                      result_queue) 
-                      for tid in range(NUM_THREADS)]
+    # Пытаемся загрузить состояние
+    state = load_state()
+    
+    # Инициализация
+    manager = Manager()
+    result_queue = manager.Queue()
+    current_positions = manager.dict()
+    processed_keys = manager.Value('i', 0)
+    total_processed = manager.Value('i', 0)
+    
+    # Подготовка диапазонов
+    chunk_size = (CONFIG['end_range'] - CONFIG['start_range']) // CONFIG['num_threads']
+    chunks = []
+    
+    if state and isinstance(state.get('positions'), list):
+        # Продолжаем с сохраненных позиций
+        positions = state['positions']
+        for tid in range(min(CONFIG['num_threads'], len(positions))):
+            start = positions[tid]
+            end = CONFIG['start_range'] + (tid + 1) * chunk_size - 1 if tid < CONFIG['num_threads'] - 1 else CONFIG['end_range']
+            chunks.append((tid, start, end))
+            current_positions[tid] = start
+        
+        # Заполняем оставшиеся потоки, если нужно
+        for tid in range(len(positions), CONFIG['num_threads']):
+            start = CONFIG['start_range'] + tid * chunk_size
+            end = CONFIG['start_range'] + (tid + 1) * chunk_size - 1 if tid < CONFIG['num_threads'] - 1 else CONFIG['end_range']
+            chunks.append((tid, start, end))
+            current_positions[tid] = start
             
-            active_threads = NUM_THREADS
+        processed_keys.value = state.get('processed', 0)
+        total_processed.value = state.get('processed', 0)
+    else:
+        # Начинаем с начала
+        for tid in range(CONFIG['num_threads']):
+            start = CONFIG['start_range'] + tid * chunk_size
+            end = CONFIG['start_range'] + (tid + 1) * chunk_size - 1 if tid < CONFIG['num_threads'] - 1 else CONFIG['end_range']
+            chunks.append((tid, start, end))
+            current_positions[tid] = start
+    
+    # Статистика
+    stats = {
+        'processed': total_processed.value,
+        'speed': 0,
+        'percent': 0,
+        'elapsed': 0
+    }
+    
+    try:
+        with ProcessPoolExecutor(max_workers=CONFIG['num_threads']) as executor:
+            # Запуск потоков
+            futures = [executor.submit(process_chunk, tid, start, end, result_queue) 
+                      for tid, start, end in chunks]
+            
+            active_threads = CONFIG['num_threads']
             last_print_time = time.time()
+            last_save_time = time.time()
             
             while active_threads > 0:
+                # Обработка сообщений
                 while not result_queue.empty():
                     msg_type, data = result_queue.get_nowait()
                     
                     if msg_type == 'found':
                         print(f"\n{Fore.GREEN}🎉 Ключ найден: 0x{data}{Style.RESET_ALL}")
+                        for future in futures:
+                            future.cancel()
+                        if os.path.exists(CONFIG['state_file']):
+                            os.remove(CONFIG['state_file'])
                         return
                         
                     elif msg_type == 'progress':
-                        progress_data[data['thread_id']].update(data)
+                        # Обновляем статистику
+                        current_positions[data['thread_id']] = data['last_position']
+                        delta_processed = data['processed']
+                        total_processed.value += delta_processed
                         
-                    elif msg_type == 'jump':
-                        progress_data[data['thread_id']]['skipped'] += data['skipped']
-                        progress_data[data['thread_id']]['current'] = data['to']
-                        jump_history.append(data)
-                        if len(jump_history) > 10:
-                            jump_history.pop(0)
+                        stats['processed'] = total_processed.value
+                        stats['speed'] = data['speed']  # Используем скорость последнего потока
+                        stats['percent'] = max(stats['percent'], data['percent'])
+                        stats['elapsed'] = max(stats['elapsed'], data['elapsed'])
                     
                     elif msg_type == 'done':
-                        progress_data[data]['active'] = False
                         active_threads -= 1
-                    
-                    elif msg_type == 'error':
-                        print(f"{Fore.RED}Ошибка в потоке {data['thread_id']}: {data['error']}{Style.RESET_ALL}")
-                        print(data['traceback'])
                 
-                if time.time() - last_print_time >= MIN_UPDATE_INTERVAL:
-                    print_progress(progress_data, jump_history)
+                # Обновление экрана
+                if time.time() - last_print_time >= CONFIG['update_interval']:
+                    print_status(benchmark, stats, dict(current_positions))
                     last_print_time = time.time()
+                
+                # Автосохранение каждые 5 минут
+                if time.time() - last_save_time > 300:
+                    if save_state(dict(current_positions), total_processed.value):
+                        last_save_time = time.time()
+                        print(f"{Fore.GREEN}\nСостояние автоматически сохранено{Style.RESET_ALL}")
                 
                 time.sleep(0.1)
             
-            print(f"\n{Fore.YELLOW}🔍 Поиск завершен, ключ не найден{Style.RESET_ALL}")
-            
+            print(f"\n{Fore.YELLOW}Поиск завершен. Ключ не найден.{Style.RESET_ALL}")
+            if os.path.exists(CONFIG['state_file']):
+                os.remove(CONFIG['state_file'])
+    
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}🛑 Поиск остановлен пользователем{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Сохранение состояния перед выходом...{Style.RESET_ALL}")
+        save_state(dict(current_positions), total_processed.value)
+        print(f"{Fore.GREEN}Сохранено текущее состояние в {CONFIG['state_file']}{Style.RESET_ALL}")
     except Exception as e:
-        print(f"\n{Fore.RED}❌ Критическая ошибка: {str(e)}{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}Ошибка: {str(e)}{Style.RESET_ALL}")
         traceback.print_exc()
+        save_state(dict(current_positions), total_processed.value)
 
 if __name__ == "__main__":
     freeze_support()
-    try:
-        main()
-    except Exception as e:
-        print(f"\n{Fore.RED}❌ Необработанная ошибка: {str(e)}{Style.RESET_ALL}")
-        traceback.print_exc()
+    main()
