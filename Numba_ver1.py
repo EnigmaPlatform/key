@@ -7,72 +7,100 @@ import os
 import json
 from numba import jit
 import traceback
-from multiprocessing import Manager, freeze_support
+from multiprocessing import Manager, freeze_support, Value, Lock
 from colorama import init, Fore, Back, Style
 import sys
+import signal
 
 # Инициализация colorama
 init()
 
 # Конфигурация
 CONFIG = {
-    "target_hash": "5db8cda53a6a002db10365967d7f85d19e171b10",
-    "start_range": 0x349b84b6430a5c4ef9,
-    "end_range": 0x349b84b6431a6c4ef9,
+    "target_hash": "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8",
+    "start_range": 0x780000000000000000,
+    "end_range": 0x800000000000000000,
     "num_threads": max(8, os.cpu_count() + 6),
     "update_interval": 2.0,
-    "state_file": "search_state.json"
+    "state_file": "search_state.json",
+    "backup_interval": 300  # 5 минут в секундах
 }
+
+class JumpCounter:
+    def __init__(self, manager):
+        self.total_jumps = manager.Value('i', 0)
+        self.jump_stats = manager.dict({
+            'small': manager.Value('i', 0),
+            'medium': manager.Value('i', 0),
+            'large': manager.Value('i', 0),
+            'huge': manager.Value('i', 0)
+        })
+        self.lock = manager.Lock()
+    
+    def increment(self, jump_type):
+        with self.lock:
+            self.total_jumps.value += 1
+            if jump_type in self.jump_stats:
+                self.jump_stats[jump_type].value += 1
 
 @jit(nopython=True)
 def detect_repeats_numba(key_part):
-    """Проверка повторений в последних 17 символах"""
+    """Проверка повторений в последних 17 символах, ищем максимальное количество повторений"""
     max_repeats = 1
     current = 1
+    
     for i in range(1, len(key_part)):
         if key_part[i] == key_part[i-1]:
             current += 1
             if current > max_repeats:
                 max_repeats = current
-                if max_repeats >= 14:
-                    return max_repeats
         else:
             current = 1
+    
     return max_repeats
 
-def calculate_jump(key_hex, thread_id):
-    """Агрессивные прыжки на основе повторений"""
+def calculate_jump(key_hex, thread_id, jump_counter):
+    """Агрессивные прыжки на основе максимального количества повторений"""
     original = int(key_hex, 16)
     last_17 = key_hex[-17:]
     
     max_repeat = detect_repeats_numba(last_17)
     
+    # Приоритет для наибольшего количества повторений
     if max_repeat >= 14:
         jump_size = 0x100000000  # 4,294,967,296 ключей
+        jump_type = 'huge'
     elif max_repeat >= 10:
         jump_size = 0x1000000    # 16,777,216 ключей
+        jump_type = 'large'
     elif max_repeat >= 7:
         jump_size = 0x10000      # 65,536 ключей
+        jump_type = 'medium'
     elif max_repeat >= 4:
         jump_size = 0x100        # 256 ключей
+        jump_type = 'small'
     else:
         return original + 1      # Обычный инкремент
     
+    # Увеличиваем счетчик прыжков
+    jump_counter.increment(jump_type)
+    
     new_pos = original + jump_size
     
-    if jump_size >= 0x1000000:
-        print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} ключей: "
+    if jump_size >= 0x10000:
+        print(f"{Fore.MAGENTA}[Поток {thread_id}] Прыжок на {jump_size:,} ключей ({jump_type}): "
               f"0x{key_hex[-18:]} → 0x{f'{new_pos:x}'[-18:]}{Style.RESET_ALL}")
     
     return min(new_pos, CONFIG['end_range'])
 
-def process_chunk(thread_id, start, end, result_queue):
+def process_chunk(thread_id, start, end, result_queue, jump_counter):
     """Обработка диапазона ключей с прыжками"""
     current = start
     chunk_size = end - start
     chunk_start_time = time.time()
     last_update = chunk_start_time
     processed = 0
+    local_jumps = 0
     
     while current <= end:
         key_hex = f"{current:064x}"
@@ -103,13 +131,17 @@ def process_chunk(thread_id, start, end, result_queue):
                         'processed': processed,
                         'speed': speed,
                         'percent': percent,
-                        'elapsed': elapsed
+                        'elapsed': elapsed,
+                        'local_jumps': local_jumps
                     }))
                     last_update = now
             except Exception:
                 pass
         
-        current = calculate_jump(key_hex, thread_id)
+        prev_current = current
+        current = calculate_jump(key_hex, thread_id, jump_counter)
+        if current > prev_current + 1:
+            local_jumps += 1
     
     result_queue.put(('done', thread_id))
 
@@ -133,39 +165,89 @@ def run_benchmark():
     return {'speed': speed}
 
 def load_state():
-    """Загрузка состояния из файла"""
+    """Загрузка состояния из файла с подтверждением пользователя"""
     if not os.path.exists(CONFIG['state_file']):
         return None
         
     print(f"\n{Fore.YELLOW}Обнаружен файл сохранения: {CONFIG['state_file']}{Style.RESET_ALL}")
-    choice = input("Хотите продолжить с предыдущего места? (y/n): ").strip().lower()
-    if choice != 'y':
-        return None
+    print(f"{Fore.CYAN}Последнее изменение: {time.ctime(os.path.getmtime(CONFIG['state_file']))}{Style.RESET_ALL}")
     
     try:
         with open(CONFIG['state_file'], 'r') as f:
             state = json.load(f)
-        print(f"{Fore.GREEN}Состояние загружено{Style.RESET_ALL}")
-        return state
+        
+        # Показать пользователю информацию о сохранении
+        print(f"\n{Fore.CYAN}=== ИНФОРМАЦИЯ О СОХРАНЕНИИ ===")
+        print(f"Прогресс: {state.get('percent', 0):.18f}%")
+        print(f"Обработано ключей: {state.get('processed', 0):,}")
+        print(f"Последние позиции потоков:{Style.RESET_ALL}")
+        for tid, pos in enumerate(state.get('positions', [])):
+            print(f"  Поток {tid}: 0x{f'{int(pos, 16):x}'[-18:]}")
+        
+        # Запросить подтверждение
+        while True:
+            choice = input("\nХотите продолжить с этого места? (y/n/delete): ").strip().lower()
+            if choice == 'y':
+                print(f"{Fore.GREEN}Состояние загружено{Style.RESET_ALL}")
+                return state
+            elif choice == 'n':
+                print(f"{Fore.YELLOW}Начинаем новый поиск{Style.RESET_ALL}")
+                return None
+            elif choice == 'delete':
+                os.remove(CONFIG['state_file'])
+                print(f"{Fore.GREEN}Файл сохранения удален. Начинаем новый поиск.{Style.RESET_ALL}")
+                return None
+            else:
+                print(f"{Fore.RED}Пожалуйста, введите 'y', 'n' или 'delete'{Style.RESET_ALL}")
+                
     except Exception as e:
         print(f"{Fore.RED}Ошибка загрузки состояния: {e}{Style.RESET_ALL}")
         return None
 
-def save_state(positions, processed):
-    """Сохранение текущего состояния"""
+def save_state(positions, processed, jump_counter):
+    """Сохранение текущего состояния с проверкой"""
+    temp_file = CONFIG['state_file'] + ".tmp"
     try:
-        with open(CONFIG['state_file'], 'w') as f:
+        # Сохраняем во временный файл
+        with open(temp_file, 'w') as f:
             json.dump({
                 'positions': positions,
                 'processed': processed,
-                'config': CONFIG
+                'config': CONFIG,
+                'jump_stats': {
+                    'total': jump_counter.total_jumps.value,
+                    'small': jump_counter.jump_stats['small'].value,
+                    'medium': jump_counter.jump_stats['medium'].value,
+                    'large': jump_counter.jump_stats['large'].value,
+                    'huge': jump_counter.jump_stats['huge'].value
+                },
+                'timestamp': time.time(),
+                'percent': calculate_percentage(positions)
             }, f, indent=2)
+        
+        # Проверяем, что файл записался корректно
+        with open(temp_file, 'r') as f:
+            json.load(f)  # Проверка что JSON валиден
+        
+        # Заменяем старый файл новым
+        if os.path.exists(CONFIG['state_file']):
+            os.remove(CONFIG['state_file'])
+        os.rename(temp_file, CONFIG['state_file'])
+        
         return True
     except Exception as e:
         print(f"{Fore.RED}Ошибка сохранения состояния: {e}{Style.RESET_ALL}")
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
         return False
 
-def print_status(stats, last_keys):
+def calculate_percentage(positions):
+    """Вычисление общего прогресса"""
+    total_range = CONFIG['end_range'] - CONFIG['start_range']
+    progress = sum(pos - CONFIG['start_range'] for pos in positions) / total_range
+    return (progress / CONFIG['num_threads']) * 100
+
+def print_status(stats, last_keys, jump_counter):
     """Вывод информации о статусе поиска"""
     os.system('cls' if os.name == 'nt' else 'clear')
     
@@ -173,6 +255,14 @@ def print_status(stats, last_keys):
     print(f"Потоков: {CONFIG['num_threads']} | Скорость: {stats['speed']:,.0f} ключей/сек")
     print(f"Обработано: {stats['processed']:,} ключей | Прогресс: {stats['percent']:.18f}%")
     print(f"Прошло времени: {stats['elapsed']/60:.1f} минут")
+    
+    # Статистика прыжков
+    print(f"\n{Fore.YELLOW}СТАТИСТИКА ПРЫЖКОВ:{Style.RESET_ALL}")
+    print(f"Всего прыжков: {jump_counter.total_jumps.value:,}")
+    print(f"  Малые (256): {jump_counter.jump_stats['small'].value:,}")
+    print(f"  Средние (65K): {jump_counter.jump_stats['medium'].value:,}")
+    print(f"  Большие (16M): {jump_counter.jump_stats['large'].value:,}")
+    print(f"  Огромные (4.2G): {jump_counter.jump_stats['huge'].value:,}")
     
     print(f"\n{Fore.YELLOW}ПОСЛЕДНИЕ ПРОВЕРЕННЫЕ КЛЮЧИ:{Style.RESET_ALL}")
     for tid in sorted(last_keys.keys()):
@@ -185,6 +275,17 @@ def print_status(stats, last_keys):
     
     print(f"\n{Fore.WHITE}Для выхода нажмите Ctrl+C (состояние будет сохранено){Style.RESET_ALL}")
 
+def setup_signal_handlers(result_queue, positions, processed, jump_counter):
+    """Установка обработчиков сигналов для корректного завершения"""
+    def signal_handler(sig, frame):
+        print(f"\n{Fore.YELLOW}Получен сигнал завершения. Сохраняем состояние...{Style.RESET_ALL}")
+        save_state(positions, processed.value, jump_counter)
+        print(f"{Fore.GREEN}Сохранение завершено. Выход.{Style.RESET_ALL}")
+        os._exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
 def main():
     """Главная функция выполнения"""
     benchmark = run_benchmark()
@@ -193,25 +294,35 @@ def main():
     manager = Manager()
     result_queue = manager.Queue()
     last_keys = manager.dict()
-    total_processed = manager.Value('i', 0)
+    total_processed = manager.Value('i', state['processed'] if state else 0)
     total_speed = manager.Value('f', 0.0)
+    jump_counter = JumpCounter(manager)  # Передаем manager в JumpCounter
     
     # Инициализация позиций потоков
     chunk_size = (CONFIG['end_range'] - CONFIG['start_range']) // CONFIG['num_threads']
     positions = []
     for tid in range(CONFIG['num_threads']):
         if state and 'positions' in state and tid < len(state['positions']):
-            positions.append(state['positions'][tid])
+            positions.append(int(state['positions'][tid], 16))
         else:
             positions.append(CONFIG['start_range'] + tid * chunk_size)
         last_keys[tid] = f"{positions[tid]:064x}"  # Инициализация последнего ключа
     
+    # Загрузка статистики прыжков из сохранения
+    if state and 'jump_stats' in state:
+        jump_counter.total_jumps.value = state['jump_stats'].get('total', 0)
+        for jump_type in jump_counter.jump_stats:
+            jump_counter.jump_stats[jump_type].value = state['jump_stats'].get(jump_type, 0)
+    
     stats = {
-        'processed': state['processed'] if state else 0,
+        'processed': total_processed.value,
         'speed': 0,
-        'percent': 0,
+        'percent': calculate_percentage(positions),
         'elapsed': 0
     }
+    
+    # Установка обработчиков сигналов
+    setup_signal_handlers(result_queue, positions, total_processed, jump_counter)
     
     try:
         with ProcessPoolExecutor(max_workers=CONFIG['num_threads']) as executor:
@@ -219,10 +330,11 @@ def main():
             for tid in range(CONFIG['num_threads']):
                 start = positions[tid]
                 end = CONFIG['start_range'] + (tid + 1) * chunk_size - 1 if tid < CONFIG['num_threads'] - 1 else CONFIG['end_range']
-                futures.append(executor.submit(process_chunk, tid, start, end, result_queue))
+                futures.append(executor.submit(process_chunk, tid, start, end, result_queue, jump_counter))
             
             active_threads = CONFIG['num_threads']
             last_save_time = time.time()
+            last_update_time = time.time()
             
             while active_threads > 0:
                 if not result_queue.empty():
@@ -242,6 +354,9 @@ def main():
                         last_keys[tid] = data['last_key']
                         total_processed.value += data['processed']
                         
+                        # Обновляем позицию потока
+                        positions[tid] = data['current']
+                        
                         # Рассчет общей скорости
                         if data['elapsed'] > 0:
                             current_speed = total_processed.value / data['elapsed']
@@ -250,7 +365,7 @@ def main():
                         stats.update({
                             'processed': total_processed.value,
                             'speed': total_speed.value,
-                            'percent': data['percent'],
+                            'percent': calculate_percentage(positions),
                             'elapsed': data['elapsed']
                         })
                     
@@ -258,13 +373,16 @@ def main():
                         active_threads -= 1
                 
                 # Обновление статуса
-                if time.time() - last_save_time >= CONFIG['update_interval']:
-                    print_status(stats, dict(last_keys))
+                current_time = time.time()
+                if current_time - last_update_time >= CONFIG['update_interval']:
+                    print_status(stats, dict(last_keys), jump_counter)
+                    last_update_time = current_time
                 
-                # Автосохранение каждые 5 минут
-                if time.time() - last_save_time > 300:
-                    if save_state([last_keys[tid] for tid in range(CONFIG['num_threads'])], total_processed.value):
-                        last_save_time = time.time()
+                # Автосохранение
+                if current_time - last_save_time > CONFIG['backup_interval']:
+                    if save_state([f"{pos:064x}" for pos in positions], total_processed.value, jump_counter):
+                        last_save_time = current_time
+                        print(f"\n{Fore.GREEN}Автосохранение выполнено.{Style.RESET_ALL}")
                 
                 time.sleep(0.1)
             
@@ -272,14 +390,10 @@ def main():
             if os.path.exists(CONFIG['state_file']):
                 os.remove(CONFIG['state_file'])
     
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}Сохранение состояния перед выходом...{Style.RESET_ALL}")
-        save_state([last_keys[tid] for tid in range(CONFIG['num_threads'])], total_processed.value)
-        print(f"{Fore.GREEN}Сохранено текущее состояние в {CONFIG['state_file']}{Style.RESET_ALL}")
     except Exception as e:
         print(f"\n{Fore.RED}Ошибка: {str(e)}{Style.RESET_ALL}")
         traceback.print_exc()
-        save_state([last_keys[tid] for tid in range(CONFIG['num_threads'])], total_processed.value)
+        save_state([f"{pos:064x}" for pos in positions], total_processed.value, jump_counter)
 
 if __name__ == "__main__":
     freeze_support()
