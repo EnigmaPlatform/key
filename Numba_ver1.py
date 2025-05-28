@@ -20,7 +20,7 @@ CONFIG = {
     "target_hash": "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8",
     "start_range": 0x780000000000000000,
     "end_range": 0x800000000000000000,
-    "num_threads": max(8, os.cpu_count() + 6),
+    "num_threads": max(8, os.cpu_count() + 4),
     "update_interval": 2.0,
     "state_file": "search_state.json",
     "backup_interval": 300  # 5 минут в секундах
@@ -60,24 +60,24 @@ def detect_repeats_numba(key_part):
     return max_repeats
 
 def calculate_jump(key_hex, thread_id, jump_counter):
-    """Определение размера прыжка на основе максимального количества повторений"""
+    """Определение размера прыжка по строгому приоритету"""
     original = int(key_hex, 16)
     last_17 = key_hex[-17:]
     
     max_repeat = detect_repeats_numba(last_17)
     
-    # Определяем прыжок по убыванию - от самого большого к самому маленькому
+    # Строгий приоритет прыжков
     if max_repeat >= 14:
-        jump_size = 0x100000000  # 4,294,967,296 ключей
+        jump_size = 0x1000000000000  # 4.2B (huge)
         jump_type = 'huge'
     elif max_repeat >= 10:
-        jump_size = 0x1000000    # 16,777,216 ключей
+        jump_size = 0x1000000000    # 16M (large)
         jump_type = 'large'
     elif max_repeat >= 7:
-        jump_size = 0x10000      # 65,536 ключей
+        jump_size = 0x1000000      # 65K (medium)
         jump_type = 'medium'
     elif max_repeat >= 4:
-        jump_size = 0x100        # 256 ключей
+        jump_size = 0x100        # 256 (small)
         jump_type = 'small'
     else:
         return original + 1      # Обычный инкремент
@@ -92,7 +92,7 @@ def calculate_jump(key_hex, thread_id, jump_counter):
     return min(new_pos, CONFIG['end_range'])
 
 def process_chunk(thread_id, start, end, result_queue, jump_counter):
-    """Обработка диапазона ключей с прыжками"""
+    """Обработка диапазона ключей с улучшенной синхронизацией"""
     current = start
     chunk_size = end - start
     chunk_start_time = time.time()
@@ -100,46 +100,49 @@ def process_chunk(thread_id, start, end, result_queue, jump_counter):
     processed = 0
     local_jumps = 0
     
+    print(f"{Fore.BLUE}[Поток {thread_id}] Старт: 0x{start:064x} -> 0x{end:064x}{Style.RESET_ALL}")
+    
     while current <= end:
         key_hex = f"{current:064x}"
-        key_last_17 = key_hex[-17:]
         
-        if detect_repeats_numba(key_last_17) < 4:
-            try:
-                key_bytes = bytes.fromhex(key_hex)
-                pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
-                h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
-                
-                if h == CONFIG['target_hash']:
-                    result_queue.put(('found', (thread_id, key_hex)))
-                    return
-                
-                processed += 1
-                
-                now = time.time()
-                if now - last_update >= CONFIG['update_interval']:
-                    elapsed = now - chunk_start_time
-                    speed = processed / elapsed
-                    percent = (current - start) / chunk_size * 100
-                    
-                    result_queue.put(('progress', {
-                        'thread_id': thread_id,
-                        'current': current,
-                        'last_key': key_hex,
-                        'processed': processed,
-                        'speed': speed,
-                        'percent': percent,
-                        'elapsed': elapsed,
-                        'local_jumps': local_jumps
-                    }))
-                    last_update = now
-            except Exception:
-                pass
-        
+        # Сначала пытаемся сделать прыжок
         prev_current = current
         current = calculate_jump(key_hex, thread_id, jump_counter)
         if current > prev_current + 1:
             local_jumps += 1
+            continue
+        
+        # Проверяем ключ только если не было прыжка
+        try:
+            key_bytes = bytes.fromhex(key_hex)
+            pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
+            h = hashlib.new('ripemd160', hashlib.sha256(pub_key).digest()).hexdigest()
+            
+            if h == CONFIG['target_hash']:
+                result_queue.put(('found', (thread_id, key_hex)))
+                return
+            
+            processed += 1
+            
+            # Обновляем статистику
+            now = time.time()
+            if now - last_update >= CONFIG['update_interval']:
+                result_queue.put(('progress', {
+                    'thread_id': thread_id,
+                    'current': current,
+                    'last_key': key_hex,
+                    'processed': processed,
+                    'speed': processed / (now - chunk_start_time),
+                    'percent': (current - start) / chunk_size * 100,
+                    'elapsed': now - chunk_start_time,
+                    'local_jumps': local_jumps
+                }))
+                last_update = now
+        
+        except Exception as e:
+            print(f"{Fore.RED}[Поток {thread_id}] Ошибка проверки ключа: {e}{Style.RESET_ALL}")
+        
+        current += 1
     
     result_queue.put(('done', thread_id))
 
@@ -163,7 +166,7 @@ def run_benchmark():
     return {'speed': speed}
 
 def load_state():
-    """Загрузка состояния из файла с подтверждением пользователя"""
+    """Загрузка состояния из файла с улучшенной обработкой ошибок"""
     if not os.path.exists(CONFIG['state_file']):
         return None
         
@@ -201,7 +204,7 @@ def load_state():
         return None
 
 def save_state(positions, processed, jump_counter):
-    """Сохранение текущего состояния с проверкой"""
+    """Сохранение текущего состояния с улучшенной обработкой"""
     temp_file = CONFIG['state_file'] + ".tmp"
     try:
         state_data = {
@@ -237,13 +240,15 @@ def save_state(positions, processed, jump_counter):
         return False
 
 def calculate_percentage(positions):
-    """Вычисление общего прогресса"""
+    """Вычисление общего прогресса с проверкой диапазона"""
     total_range = CONFIG['end_range'] - CONFIG['start_range']
+    if total_range <= 0:
+        return 0.0
     progress = sum(pos - CONFIG['start_range'] for pos in positions) / total_range
     return (progress / CONFIG['num_threads']) * 100
 
 def print_status(stats, last_keys, jump_counter):
-    """Вывод информации о статусе поиска"""
+    """Вывод информации о статусе поиска с улучшенным форматированием"""
     os.system('cls' if os.name == 'nt' else 'clear')
     
     print(f"{Fore.CYAN}=== ИНФОРМАЦИЯ О ПОИСКЕ ==={Style.RESET_ALL}")
@@ -270,7 +275,7 @@ def print_status(stats, last_keys, jump_counter):
     print(f"\n{Fore.WHITE}Для выхода нажмите Ctrl+C (состояние будет сохранено){Style.RESET_ALL}")
 
 def setup_signal_handlers(positions, processed, jump_counter):
-    """Установка обработчиков сигналов для корректного завершения"""
+    """Установка обработчиков сигналов с улучшенной обработкой"""
     def signal_handler(sig, frame):
         print(f"\n{Fore.YELLOW}Получен сигнал завершения. Сохраняем состояние...{Style.RESET_ALL}")
         save_state(positions, processed, jump_counter)
@@ -281,7 +286,7 @@ def setup_signal_handlers(positions, processed, jump_counter):
     signal.signal(signal.SIGTERM, signal_handler)
 
 def main():
-    """Главная функция выполнения"""
+    """Главная функция выполнения с полной инициализацией"""
     benchmark = run_benchmark()
     state = load_state()
     
@@ -292,19 +297,28 @@ def main():
     total_speed = manager.Value('f', 0.0)
     jump_counter = JumpCounter(manager)
     
+    # Инициализация диапазонов с проверкой
     chunk_size = (CONFIG['end_range'] - CONFIG['start_range']) // CONFIG['num_threads']
     positions = []
     for tid in range(CONFIG['num_threads']):
         if state and 'positions' in state and tid < len(state['positions']):
-            positions.append(int(state['positions'][tid], 16))
+            try:
+                pos = int(state['positions'][tid], 16)
+                positions.append(pos)
+            except:
+                positions.append(CONFIG['start_range'] + tid * chunk_size)
         else:
             positions.append(CONFIG['start_range'] + tid * chunk_size)
         last_keys[tid] = f"{positions[tid]:064x}"
+        print(f"{Fore.GREEN}[Инициализация] Поток {tid} начинается с 0x{positions[tid]:064x}{Style.RESET_ALL}")
     
-    if state and 'jump_stats' in state:
-        jump_counter.total_jumps.value = state['jump_stats'].get('total', 0)
-        for jump_type in jump_counter.jump_stats:
-            jump_counter.jump_stats[jump_type].value = state['jump_stats'].get(jump_type, 0)
+    # Проверка границ диапазонов
+    for tid in range(CONFIG['num_threads']):
+        start = positions[tid]
+        end = CONFIG['start_range'] + (tid + 1) * chunk_size - 1 if tid < CONFIG['num_threads'] - 1 else CONFIG['end_range']
+        if start >= end:
+            print(f"{Fore.RED}Ошибка: неверный диапазон для потока {tid} (0x{start:064x} >= 0x{end:064x}){Style.RESET_ALL}")
+            end = start + chunk_size
     
     stats = {
         'processed': total_processed.value,
