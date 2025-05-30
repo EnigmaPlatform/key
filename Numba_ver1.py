@@ -14,7 +14,6 @@ from queue import Queue, Empty
 import ctypes
 import shutil
 from numba import njit
-import numpy as np
 
 # Инициализация colorama
 init(autoreset=True)
@@ -35,8 +34,7 @@ CONFIG = {
     "max_similar": 5,
     "min_key_length": 64,
     "progress_queue_size": 1000,
-    "cache_clear_threshold": 100_000,
-    "batch_size": 10_000
+    "cache_clear_threshold": 100_000
 }
 
 class ProgressQueue:
@@ -201,15 +199,6 @@ def test_hashing() -> bool:
     
     return all_passed
 
-@njit(cache=True)
-def process_key_numba(key_int: int, target_hash: str) -> Tuple[bool, str]:
-    """Оптимизированная обработка ключа с использованием Numba"""
-    try:
-        key_hex = "%064x" % key_int
-        return (False, key_hex)
-    except:
-        return (False, "")
-
 def process_key(key_int: int) -> Tuple[bool, str]:
     """Обработка ключа с проверкой хеша"""
     try:
@@ -224,21 +213,19 @@ def process_key(key_int: int) -> Tuple[bool, str]:
         return (False, "")
 
 def process_range(start_key: int, end_key: int, thread_id: int):
-    """Обработка диапазона ключей с проверкой только стартового ключа"""
+    """Обработка диапазона ключей"""
     progress_queue.put(thread_id, f"START {start_key} {end_key}")
     current = start_key
     last_report = current
-    total_checked = 0
     
     try:
-        # Проверяем только стартовый ключ на валидность
-        if thread_id == 0:  # Проверяем только для первого потока
+        # Проверяем только первый ключ на валидность
+        if thread_id == 0:
             key_hex = "%064x" % start_key
             if not is_valid_key(key_hex):
                 progress_queue.put(thread_id, f"ERROR Стартовый ключ невалиден: {key_hex}")
                 return
-        
-        # Обрабатываем весь диапазон без проверки валидности
+
         while current <= end_key:
             found, key_hex = process_key(current)
             if found:
@@ -246,16 +233,15 @@ def process_range(start_key: int, end_key: int, thread_id: int):
                 return
             
             current += 1
-            total_checked += 1
             
-            if total_checked % CONFIG['cache_clear_threshold'] == 0:
+            if current - last_report >= CONFIG['cache_clear_threshold']:
                 progress_queue.put(thread_id, f"PROGRESS {current}")
                 last_report = current
     
     except Exception as e:
         progress_queue.put(thread_id, f"ERROR {str(e)}")
     finally:
-        progress_queue.put(thread_id, f"END {total_checked}")
+        progress_queue.put(thread_id, f"END {current - start_key}")
 
 def light_progress_bar(iteration, total, length=30):
     """Упрощенный прогресс-бар"""
@@ -271,10 +257,10 @@ def monitor_progress(total_keys: int, num_threads: int):
     stats = {i: {'current': 0, 'start': 0, 'end': 0} for i in range(num_threads)}
     start_time = time.time()
     last_update = time.time()
-    found = False
     
     try:
         os.makedirs(CONFIG['state_dir'], exist_ok=True)
+        found = False
         
         while not found:
             total_checked = 0
@@ -295,8 +281,7 @@ def monitor_progress(total_keys: int, num_threads: int):
                         parts = line.split()
                         if parts[0] == "FOUND":
                             logger.log(f"\n{Fore.GREEN}Найден ключ: 0x{parts[1]}{Style.RESET_ALL}", True)
-                            found = True
-                            break
+                            return True
                         elif parts[0] == "START":
                             try:
                                 stats[thread_id]['start'] = int(parts[1])
@@ -314,9 +299,6 @@ def monitor_progress(total_keys: int, num_threads: int):
                 except Exception as e:
                     logger.log(f"{Fore.YELLOW}Ошибка чтения файла прогресса: {e}{Style.RESET_ALL}", True)
                     continue
-                
-                if found:
-                    break
             
             current_time = time.time()
             if current_time - last_update >= CONFIG['update_interval']:
@@ -360,7 +342,7 @@ def monitor_progress(total_keys: int, num_threads: int):
         sys.stdout.write("\n")
         sys.stdout.flush()
     
-    return found
+    return False
 
 def main():
     """Основная функция"""
@@ -414,8 +396,7 @@ def main():
         for future in futures:
             future.result()
         
-        if not monitor_progress.found:
-            logger.log(f"\n{Fore.YELLOW}Ключ не найден в заданном диапазоне.{Style.RESET_ALL}", True)
+        logger.log(f"\n{Fore.YELLOW}Завершено сканирование заданного диапазона.{Style.RESET_ALL}", True)
         
     except KeyboardInterrupt:
         logger.log(f"\n{Fore.YELLOW}Поиск остановлен пользователем.{Style.RESET_ALL}", True)
