@@ -9,13 +9,12 @@ from multiprocessing import freeze_support
 from colorama import init, Fore, Back, Style
 import sys
 import secrets
-import gc
 from typing import Dict, Tuple, List, Optional
-import shutil
-import psutil
-from math import isfinite
 from queue import Queue, Empty
 import ctypes
+import shutil
+from numba import njit
+import numpy as np
 
 # Инициализация colorama
 init(autoreset=True)
@@ -30,25 +29,14 @@ CONFIG = {
     "chunk_size": 9_900_000,
     "max_attempts": 1_000_000,
     "state_dir": "progress_states",
-    "backup_dir": "backups",
-    "max_backups": 5,
     "update_interval": 1.0,
-    "backup_interval": 300,
     "max_repeats": 4,
     "max_sequence": 4,
     "max_similar": 5,
     "min_key_length": 64,
-    "gc_interval": 1_000_000,
-    "block_delay": 0.5,
-    "memory_limit": 0.85,
-    "cpu_limit": 0.90,
-    "overflow_check_interval": 1000,
-    "memory_warning_threshold": 500,
-    "min_clear_interval": 5,
-    "gc_collect_interval": 10,
-    "max_display_value": 1_000_000_000_000_000_000,
     "progress_queue_size": 1000,
-    "cache_clear_threshold": 100_000
+    "cache_clear_threshold": 100_000,
+    "batch_size": 10_000
 }
 
 class ProgressQueue:
@@ -82,31 +70,11 @@ class ProgressQueue:
 
 progress_queue = ProgressQueue()
 
-class BlockCounter:
-    def __init__(self):
-        self.count = 0
-        self.last_clear = 0
-        self.lock = threading.Lock()
-    
-    def increment(self):
-        with self.lock:
-            self.count += 1
-    
-    def get_count(self):
-        with self.lock:
-            return self.count
-    
-    def needs_clear(self):
-        with self.lock:
-            return (self.count - self.last_clear) >= CONFIG['min_clear_interval']
-
-block_counter = BlockCounter()
-
 class LightLogger:
     def __init__(self):
         self.lock = threading.Lock()
         self.last_output_time = 0
-        self.output_interval = 0.1  # 100ms между выводами
+        self.output_interval = 0.1
         self.buffer = []
     
     def log(self, message: str, force: bool = False):
@@ -116,7 +84,6 @@ class LightLogger:
                 sys.stdout.write(message + "\n")
                 sys.stdout.flush()
                 self.last_output_time = current_time
-                # Очищаем буфер при выводе
                 self.buffer = []
             else:
                 self.buffer.append(message)
@@ -145,27 +112,32 @@ def init_worker():
         except:
             pass
 
-def is_valid_key(key_hex: str) -> bool:
-    """Оптимизированная проверка ключа"""
-    if len(key_hex) != CONFIG['min_key_length']:
+@njit(cache=True)
+def is_valid_key_numba(key_hex: str) -> bool:
+    """Оптимизированная проверка ключа с использованием Numba"""
+    if len(key_hex) != 64:
         return False
     
-    if not key_hex.startswith('0'*46) or key_hex[46] not in '4567':
+    # Проверка префикса
+    for i in range(46):
+        if key_hex[i] != '0':
+            return False
+    
+    if key_hex[46] not in {'4', '5', '6', '7'}:
         return False
     
     last_17 = key_hex[-17:]
     
-    # Быстрые проверки без сложных вычислений
-    if ('11111' in last_17 or 'aaaaa' in last_17 or 
-        '22222' in last_17 or 'bbbbb' in last_17):
-        return False
-    
-    # Проверка повторяющихся символов
-    for i in range(len(last_17) - CONFIG['max_repeats']):
-        if last_17[i] == last_17[i+1] == last_17[i+2] == last_17[i+3] == last_17[i+4]:
+    # Проверка запрещенных последовательностей
+    for i in range(len(last_17) - 4):
+        if (last_17[i] == last_17[i+1] == last_17[i+2] == last_17[i+3] == last_17[i+4]):
             return False
     
     return True
+
+def is_valid_key(key_hex: str) -> bool:
+    """Обертка для совместимости"""
+    return is_valid_key_numba(key_hex)
 
 def generate_valid_random_key() -> Tuple[int, str]:
     """Генерация валидного ключа"""
@@ -229,115 +201,64 @@ def test_hashing() -> bool:
     
     return all_passed
 
-def check_system_limits() -> bool:
-    """Проверка системных ограничений"""
+@njit(cache=True)
+def process_key_numba(key_int: int, target_hash: str) -> Tuple[bool, str]:
+    """Оптимизированная обработка ключа с использованием Numba"""
     try:
-        mem = psutil.virtual_memory()
-        cpu = psutil.cpu_percent(interval=0.1)
-        
-        if mem.percent / 100 > CONFIG['memory_limit']:
-            return False
-        
-        if cpu / 100 > CONFIG['cpu_limit']:
-            return False
-        
-        return True
-    except Exception as e:
-        logger.log(f"{Fore.YELLOW}Ошибка проверки системных ограничений: {e}{Style.RESET_ALL}", True)
-        return True
+        key_hex = "%064x" % key_int
+        return (False, key_hex)
+    except:
+        return (False, "")
 
-def aggressive_clear_caches():
-    """Агрессивная очистка кешей"""
-    try:
-        # Очистка кешей hashlib
-        if hasattr(hashlib, '_hashlib'):
-            for algo in hashlib.algorithms_available:
-                if algo in hashlib._hashlib.openssl_md_meth_names:
-                    try:
-                        getattr(hashlib, algo).__dict__.clear()
-                    except:
-                        pass
-        
-        # Очистка кешей coincurve
-        if hasattr(coincurve, '_cache'):
-            coincurve._cache.clear()
-        
-        # Принудительная очистка кешей OpenSSL (если возможно)
-        if hasattr(ctypes, 'CDLL'):
-            try:
-                libc = ctypes.CDLL(None)
-                libc.malloc_trim(0)
-            except:
-                pass
-        
-        block_counter.last_clear = block_counter.get_count()
-        logger.log(f"{Fore.YELLOW}Агрессивная очистка кешей выполнена{Style.RESET_ALL}", True)
-    except Exception as e:
-        logger.log(f"{Fore.YELLOW}Ошибка агрессивной очистки кешей: {e}{Style.RESET_ALL}", True)
-
-def check_memory():
-    """Проверка использования памяти"""
-    try:
-        process = psutil.Process(os.getpid())
-        mem = process.memory_info().rss / 1024 / 1024
-        if mem > CONFIG['memory_warning_threshold']:
-            logger.log(f"{Fore.YELLOW}Предупреждение: использование памяти {mem:.2f}MB{Style.RESET_ALL}", True)
-            aggressive_clear_caches()
-            return True
-        return False
-    except Exception as e:
-        logger.log(f"{Fore.YELLOW}Ошибка проверки памяти: {e}{Style.RESET_ALL}", True)
-        return False
-
-def process_key(key_int: int, target_hash: str) -> Tuple[bool, str]:
+def process_key(key_int: int) -> Tuple[bool, str]:
     """Обработка ключа с проверкой хеша"""
     try:
         key_hex = "%064x" % key_int
-        if not isfinite(key_int) or not is_valid_key(key_hex):
-            return (False, "")
-        
         key_bytes = bytes.fromhex(key_hex)
         pub_key = coincurve.PublicKey.from_secret(key_bytes).format(compressed=True)
         pub_key_hash = hashlib.sha256(pub_key).digest()
         h = hashlib.new('ripemd160', pub_key_hash).hexdigest()
         
-        return (h == target_hash, key_hex)
+        return (h == CONFIG['target_hash'], key_hex)
     except Exception as e:
         return (False, "")
 
 def process_range(start_key: int, end_key: int, thread_id: int):
-    """Обработка диапазона ключей с использованием очереди прогресса"""
+    """Обработка диапазона ключей с проверкой только стартового ключа"""
     progress_queue.put(thread_id, f"START {start_key} {end_key}")
-    checked = 0
-    last_report = 0
+    current = start_key
+    last_report = current
+    total_checked = 0
     
     try:
-        current = start_key
+        # Проверяем только стартовый ключ на валидность
+        if thread_id == 0:  # Проверяем только для первого потока
+            key_hex = "%064x" % start_key
+            if not is_valid_key(key_hex):
+                progress_queue.put(thread_id, f"ERROR Стартовый ключ невалиден: {key_hex}")
+                return
+        
+        # Обрабатываем весь диапазон без проверки валидности
         while current <= end_key:
-            found, key_hex = process_key(current, CONFIG['target_hash'])
+            found, key_hex = process_key(current)
             if found:
                 progress_queue.put(thread_id, f"FOUND {key_hex}")
                 return
             
-            checked += 1
             current += 1
+            total_checked += 1
             
-            # Отчет о прогрессе с регулируемой частотой
-            if checked - last_report >= CONFIG['cache_clear_threshold']:
+            if total_checked % CONFIG['cache_clear_threshold'] == 0:
                 progress_queue.put(thread_id, f"PROGRESS {current}")
-                last_report = checked
-                
-                # Периодическая проверка памяти
-                if checked % (CONFIG['cache_clear_threshold'] * 10) == 0:
-                    check_memory()
+                last_report = current
     
     except Exception as e:
         progress_queue.put(thread_id, f"ERROR {str(e)}")
     finally:
-        progress_queue.put(thread_id, f"END {checked}")
+        progress_queue.put(thread_id, f"END {total_checked}")
 
 def light_progress_bar(iteration, total, length=30):
-    """Упрощенный прогресс-бар для уменьшения нагрузки"""
+    """Упрощенный прогресс-бар"""
     if total <= 0:
         return "[------]"
     
@@ -346,12 +267,11 @@ def light_progress_bar(iteration, total, length=30):
     return f"[{'#' * filled}{'-' * (length - filled)}] {percent:.1f}%"
 
 def monitor_progress(total_keys: int, num_threads: int):
-    """Облегченный мониторинг прогресса"""
+    """Мониторинг прогресса"""
     stats = {i: {'current': 0, 'start': 0, 'end': 0} for i in range(num_threads)}
     start_time = time.time()
     last_update = time.time()
     found = False
-    last_mem_check = 0
     
     try:
         os.makedirs(CONFIG['state_dir'], exist_ok=True)
@@ -419,21 +339,9 @@ def monitor_progress(total_keys: int, num_threads: int):
                         elapsed_time = max(0.1, current_time - start_time)
                         speed = completed / elapsed_time
                         
-                        # Облегченный вывод информации
                         sys.stdout.write("\r")
                         sys.stdout.write(f"Прогресс: {light_progress_bar(completed, total_range)} ")
                         sys.stdout.write(f"Скорость: {speed/1000:,.1f}K keys/s ")
-                        sys.stdout.write(f"Блоков: {block_counter.get_count()} ")
-                        
-                        # Проверка памяти не чаще чем раз в 5 секунд
-                        if current_time - last_mem_check > 5:
-                            try:
-                                mem = psutil.virtual_memory()
-                                sys.stdout.write(f"Mem: {mem.percent}% ")
-                                last_mem_check = current_time
-                            except:
-                                pass
-                        
                         sys.stdout.flush()
                     
                     last_update = current_time
@@ -455,7 +363,7 @@ def monitor_progress(total_keys: int, num_threads: int):
     return found
 
 def main():
-    """Оптимизированная основная функция"""
+    """Основная функция"""
     logger.log(f"{Fore.CYAN}=== ИНИЦИАЛИЗАЦИЯ ПРОГРАММЫ ===", True)
     
     # Проверка теста хеширования перед запуском
@@ -465,9 +373,6 @@ def main():
     
     if os.path.exists(CONFIG['state_dir']):
         shutil.rmtree(CONFIG['state_dir'])
-    
-    # Настройка сборщика мусора
-    gc.set_threshold(700, 10, 10)
     
     try:
         total_keys = CONFIG['check_range']
@@ -485,60 +390,46 @@ def main():
             initializer=init_worker
         )
         
-        try:
-            while True:
-                if not check_system_limits():
-                    logger.log(f"{Fore.YELLOW}Системные ограничения превышены. Пауза...{Style.RESET_ALL}", True)
-                    time.sleep(2)
-                    continue
-                
-                # Генерация и отображение стартового ключа блока
-                start_key, current_key_hex = generate_valid_random_key()
-                logger.log(f"\n{Fore.MAGENTA}Начало нового блока с ключа: 0x{current_key_hex}{Style.RESET_ALL}", True)
-                block_counter.increment()
-                
-                futures = []
-                for i in range(CONFIG['num_threads']):
-                    chunk_start = start_key + i * CONFIG['chunk_size']
-                    chunk_end = chunk_start + CONFIG['chunk_size'] - 1
-                    
-                    if i == CONFIG['num_threads'] - 1:
-                        chunk_end = start_key + CONFIG['check_range'] - 1
-                    
-                    futures.append(executor.submit(
-                        process_range,
-                        chunk_start,
-                        chunk_end,
-                        i
-                    ))
-                
-                for future in futures:
-                    future.result()
-                
-                # Агрессивная очистка после каждого блока
-                aggressive_clear_caches()
-                
-                # Управление памятью
-                if block_counter.get_count() % CONFIG['gc_collect_interval'] == 0:
-                    gc.collect()
-                
-                time.sleep(CONFIG['block_delay'])
+        # Генерация и проверка стартового ключа
+        start_key, start_key_hex = generate_valid_random_key()
+        logger.log(f"\n{Fore.MAGENTA}Начало работы с ключа: 0x{start_key_hex}{Style.RESET_ALL}", True)
         
-        finally:
-            executor.shutdown(wait=False)
-            progress_queue.stop()
-    
+        # Запуск обработки
+        futures = []
+        for i in range(CONFIG['num_threads']):
+            chunk_start = start_key + i * CONFIG['chunk_size']
+            chunk_end = chunk_start + CONFIG['chunk_size'] - 1
+            
+            if i == CONFIG['num_threads'] - 1:
+                chunk_end = start_key + CONFIG['check_range'] - 1
+            
+            futures.append(executor.submit(
+                process_range,
+                chunk_start,
+                chunk_end,
+                i
+            ))
+        
+        # Ожидание завершения
+        for future in futures:
+            future.result()
+        
+        if not monitor_progress.found:
+            logger.log(f"\n{Fore.YELLOW}Ключ не найден в заданном диапазоне.{Style.RESET_ALL}", True)
+        
     except KeyboardInterrupt:
         logger.log(f"\n{Fore.YELLOW}Поиск остановлен пользователем.{Style.RESET_ALL}", True)
     except Exception as e:
         logger.log(f"\n{Fore.RED}Ошибка: {type(e).__name__}: {e}{Style.RESET_ALL}", True)
     finally:
-        logger.log(f"\n{Fore.CYAN}Завершение работы...{Style.RESET_ALL}", True)
+        executor.shutdown(wait=False)
+        progress_queue.stop()
+        logger.log(f"\n{Fore.CYAN}=== ЗАВЕРШЕНИЕ РАБОТЫ ==={Style.RESET_ALL}", True)
         if os.path.exists(CONFIG['state_dir']):
             shutil.rmtree(CONFIG['state_dir'])
         logger.flush()
 
 if __name__ == "__main__":
     freeze_support()
-    logger.log(f"{Fore.YELLOW}=== ЗАПУСК ПОИСКА ==={Style.RESET_ALL}", True)
+    logger.log(f"{Fore.YELLOW}=== ЗАПУСК ПРОГРАММЫ ==={Style.RESET_ALL}", True)
     main()
