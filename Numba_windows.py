@@ -24,8 +24,8 @@ CONFIG = {
     "start_range": 0x400000000000000000,
     "end_range": 0x7fffffffffffffffff,
     "num_threads": 12,
-    "check_range": 999_000_000,
-    "chunk_size": 99_900_000,
+    "check_range": 99_000_000,
+    "chunk_size": 9_900_000,
     "max_attempts": 1_000_000,
     "state_dir": "progress_states",
     "update_interval": 1.0,
@@ -344,6 +344,67 @@ def monitor_progress(total_keys: int, num_threads: int):
     
     return False
 
+def search_cycle():
+    """Цикл поиска с генерацией новых ключей"""
+    while True:
+        try:
+            total_keys = CONFIG['check_range']
+            
+            monitor_thread = threading.Thread(
+                target=monitor_progress,
+                args=(total_keys, CONFIG['num_threads']),
+                daemon=True
+            )
+            monitor_thread.start()
+            time.sleep(1)
+            
+            executor = ProcessPoolExecutor(
+                max_workers=CONFIG['num_threads'],
+                initializer=init_worker
+            )
+            
+            # Генерация и проверка стартового ключа
+            start_key, start_key_hex = generate_valid_random_key()
+            logger.log(f"\n{Fore.MAGENTA}Начало работы с ключа: 0x{start_key_hex}{Style.RESET_ALL}", True)
+            
+            # Запуск обработки
+            futures = []
+            for i in range(CONFIG['num_threads']):
+                chunk_start = start_key + i * CONFIG['chunk_size']
+                chunk_end = chunk_start + CONFIG['chunk_size'] - 1
+                
+                if i == CONFIG['num_threads'] - 1:
+                    chunk_end = start_key + CONFIG['check_range'] - 1
+                
+                futures.append(executor.submit(
+                    process_range,
+                    chunk_start,
+                    chunk_end,
+                    i
+                ))
+            
+            # Ожидание завершения
+            for future in futures:
+                future.result()
+            
+            logger.log(f"\n{Fore.YELLOW}Завершено сканирование заданного диапазона. Генерация нового ключа...{Style.RESET_ALL}", True)
+            
+        except KeyboardInterrupt:
+            logger.log(f"\n{Fore.YELLOW}Поиск остановлен пользователем.{Style.RESET_ALL}", True)
+            break
+        except Exception as e:
+            logger.log(f"\n{Fore.RED}Ошибка: {type(e).__name__}: {e}{Style.RESET_ALL}", True)
+            time.sleep(5)  # Пауза перед повторной попыткой
+        finally:
+            try:
+                executor.shutdown(wait=False)
+            except:
+                pass
+            progress_queue.stop()
+            if os.path.exists(CONFIG['state_dir']):
+                shutil.rmtree(CONFIG['state_dir'])
+            logger.flush()
+
 def main():
     """Основная функция"""
     logger.log(f"{Fore.CYAN}=== ИНИЦИАЛИЗАЦИЯ ПРОГРАММЫ ===", True)
@@ -356,59 +417,9 @@ def main():
     if os.path.exists(CONFIG['state_dir']):
         shutil.rmtree(CONFIG['state_dir'])
     
-    try:
-        total_keys = CONFIG['check_range']
-        
-        monitor_thread = threading.Thread(
-            target=monitor_progress,
-            args=(total_keys, CONFIG['num_threads']),
-            daemon=True
-        )
-        monitor_thread.start()
-        time.sleep(1)
-        
-        executor = ProcessPoolExecutor(
-            max_workers=CONFIG['num_threads'],
-            initializer=init_worker
-        )
-        
-        # Генерация и проверка стартового ключа
-        start_key, start_key_hex = generate_valid_random_key()
-        logger.log(f"\n{Fore.MAGENTA}Начало работы с ключа: 0x{start_key_hex}{Style.RESET_ALL}", True)
-        
-        # Запуск обработки
-        futures = []
-        for i in range(CONFIG['num_threads']):
-            chunk_start = start_key + i * CONFIG['chunk_size']
-            chunk_end = chunk_start + CONFIG['chunk_size'] - 1
-            
-            if i == CONFIG['num_threads'] - 1:
-                chunk_end = start_key + CONFIG['check_range'] - 1
-            
-            futures.append(executor.submit(
-                process_range,
-                chunk_start,
-                chunk_end,
-                i
-            ))
-        
-        # Ожидание завершения
-        for future in futures:
-            future.result()
-        
-        logger.log(f"\n{Fore.YELLOW}Завершено сканирование заданного диапазона.{Style.RESET_ALL}", True)
-        
-    except KeyboardInterrupt:
-        logger.log(f"\n{Fore.YELLOW}Поиск остановлен пользователем.{Style.RESET_ALL}", True)
-    except Exception as e:
-        logger.log(f"\n{Fore.RED}Ошибка: {type(e).__name__}: {e}{Style.RESET_ALL}", True)
-    finally:
-        executor.shutdown(wait=False)
-        progress_queue.stop()
-        logger.log(f"\n{Fore.CYAN}=== ЗАВЕРШЕНИЕ РАБОТЫ ==={Style.RESET_ALL}", True)
-        if os.path.exists(CONFIG['state_dir']):
-            shutil.rmtree(CONFIG['state_dir'])
-        logger.flush()
+    search_cycle()
+    
+    logger.log(f"\n{Fore.CYAN}=== ЗАВЕРШЕНИЕ РАБОТЫ ==={Style.RESET_ALL}", True)
 
 if __name__ == "__main__":
     freeze_support()
