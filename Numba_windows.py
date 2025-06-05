@@ -43,6 +43,7 @@ class ProgressQueue:
         self._stop_event = threading.Event()
         self.writer_thread = threading.Thread(target=self._writer, daemon=True)
         self.writer_thread.start()
+        self.open_files = {}
     
     def put(self, thread_id: int, message: str):
         try:
@@ -55,8 +56,14 @@ class ProgressQueue:
             try:
                 thread_id, message = self.queue.get(timeout=0.5)
                 progress_file = os.path.join(CONFIG['state_dir'], f"thread_{thread_id}.progress")
-                with open(progress_file, 'a') as f:
-                    f.write(message + "\n")
+                
+                try:
+                    with open(progress_file, 'a') as f:
+                        f.write(message + "\n")
+                except PermissionError:
+                    time.sleep(0.1)
+                    continue
+                    
             except Empty:
                 continue
             except:
@@ -344,6 +351,22 @@ def monitor_progress(total_keys: int, num_threads: int):
     
     return False
 
+def cleanup_progress_files():
+    """Безопасное удаление файлов прогресса"""
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            if os.path.exists(CONFIG['state_dir']):
+                shutil.rmtree(CONFIG['state_dir'])
+                break
+        except PermissionError:
+            if attempt == max_attempts - 1:
+                logger.log(f"{Fore.YELLOW}Не удалось удалить файлы прогресса, они будут оставлены{Style.RESET_ALL}", True)
+            time.sleep(1)
+        except Exception as e:
+            logger.log(f"{Fore.YELLOW}Ошибка при очистке файлов прогресса: {e}{Style.RESET_ALL}", True)
+            break
+
 def search_cycle():
     """Цикл поиска с генерацией новых ключей"""
     while True:
@@ -401,8 +424,7 @@ def search_cycle():
             except:
                 pass
             progress_queue.stop()
-            if os.path.exists(CONFIG['state_dir']):
-                shutil.rmtree(CONFIG['state_dir'])
+            cleanup_progress_files()
             logger.flush()
 
 def main():
@@ -414,8 +436,7 @@ def main():
         logger.log(f"\n{Fore.RED}Тест хеширования не пройден! Завершение работы.{Style.RESET_ALL}", True)
         return
     
-    if os.path.exists(CONFIG['state_dir']):
-        shutil.rmtree(CONFIG['state_dir'])
+    cleanup_progress_files()
     
     search_cycle()
     
