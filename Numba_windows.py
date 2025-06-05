@@ -21,8 +21,8 @@ init(autoreset=True)
 # Конфигурация
 CONFIG = {
     "target_hash": "f6f5431d25bbf7b12e8add9af5e3475c44a0a5b8",
-    "start_range": 0x400000000000000000,
-    "end_range": 0x7fffffffffffffffff,
+    "start_range": 0x600000000000000000,
+    "end_range": 0x75ffffffffffffffff,
     "num_threads": 12,
     "check_range": 99_000_000,
     "chunk_size": 9_900_000,
